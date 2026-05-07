@@ -20,6 +20,11 @@
   - [Variant A — Vertical Strip Shift (caesar1)](#variant-a--vertical-strip-shift-caesar1)
   - [Variant B — Horizontal Shift with ASCII Encoding (caesar2)](#variant-b--horizontal-shift-with-ascii-encoding-caesar2)
 - [XOR Key Recovery via File Format Headers (MetaCTF Flash 2026)](#xor-key-recovery-via-file-format-headers-metactf-flash-2026)
+- [3D Vigenere Palindrome Symmetry Key Recovery (SECCON 2017)](#3d-vigenere-palindrome-symmetry-key-recovery-seccon-2017)
+- [Nihilist Cipher Double-Crib Key Recovery (Security Fest CTF 2018)](#nihilist-cipher-double-crib-key-recovery-security-fest-ctf-2018)
+- [16-Byte XOR Block Cipher Structural Reversal (h4ckc0n 2018)](#16-byte-xor-block-cipher-structural-reversal-h4ckc0n-2018)
+- [Flag Semaphore Photo Decoding (DefCamp CTF 2018)](#flag-semaphore-photo-decoding-defcamp-ctf-2018)
+- [Two-Byte Nibble Reassembly with Random Padding (Trend Micro 2018)](#two-byte-nibble-reassembly-with-random-padding-trend-micro-2018)
 
 ---
 
@@ -540,3 +545,107 @@ print(result.stdout)  # Should show: PDF document
 **Determining key length:** If the header-derived key fragment repeats or the key is a readable string, try common lengths (8, 16, 32). Alternatively, XOR the file against itself shifted by candidate key lengths and look for low-entropy output (many null bytes indicate correct shift = key length).
 
 **References:** MetaCTF Flash CTF 2026 "In The Door"
+
+---
+
+## 3D Vigenere Palindrome Symmetry Key Recovery (SECCON 2017)
+
+**Pattern:** When k2 = reverse(k1) in a 3D Vigenere cipher, the encryption depends only on `k1[i] + k1[key_len-1-i]` (symmetric sums). Only half the key needs recovery:
+
+```python
+# Encryption: ct[i] = table[k1[i%kl]][k2[i%kl]][pt[i]]
+# With k2 = reverse(k1): ct[i] depends on k1[i%kl] + k1[(kl-1-i)%kl]
+# Known-plaintext with flag prefix recovers kl/2 sum values
+# Then brute-force one half of the key (the sums constrain the other)
+for c1 in range(len(s)):
+    for c2 in range(len(s)):
+        if (c1 + c2) % len(s) == known_sum:
+            # test this key pair
+```
+
+**Key insight:** Palindrome key structure (k2 = reverse(k1)) halves the effective keyspace. Each plaintext position depends on the sum of two key characters at mirrored positions. Known plaintext of length >= key_length/2 fully constrains these sums, reducing the remaining brute-force dramatically. This generalizes to any polyalphabetic cipher where key symmetry reduces independent key variables.
+
+**References:** SECCON CTF 2017
+
+---
+
+## Nihilist Cipher Double-Crib Key Recovery (Security Fest CTF 2018)
+
+**Pattern (Mission Impossible):** Nihilist cipher encrypts via Polybius square lookup + additive numeric key. Each plaintext letter becomes a two-digit Polybius coordinate, then the key's digit stream is added to produce ciphertext digits.
+
+**Key insight:** The flag format `midnight{...}` contains two `i` characters at known positions. Both must produce the same Polybius coordinates (e.g., `24`), so their ciphertext differences directly reveal two key digit pairs — enough to constrain the additive key. Every valid Polybius coordinate must be in range 1-5, which prunes invalid key candidates aggressively.
+
+**Recovery approach:**
+```python
+# For each pair of key digits (k1, k2) in 1..9:
+#   for each ciphertext two-digit group:
+#     plain = ((c1 - k1) % 10, (c2 - k2) % 10)
+#     if plain[0] not in 1..5 or plain[1] not in 1..5: reject
+#   otherwise test frequency (most common letter => 'e') and look up Polybius
+```
+Use the two repeated-character constraints from the flag prefix to cut the keyspace to a handful, then brute-force the Polybius square from remaining ciphertext frequency.
+
+**References:** Security Fest CTF 2018 — writeup 10210
+
+---
+
+## 16-Byte XOR Block Cipher Structural Reversal (h4ckc0n 2018)
+
+**Pattern (custom XOR block cipher):** Encryption operates on 16-byte blocks split into four 4-byte lanes. Each output byte is an XOR of several input bytes from the same block; one lane can be recovered as the XOR of the other three.
+
+**Exploit:** Because every encrypted byte is a linear combination of plaintext bytes in the same block, XOR three lanes together to reconstruct the fourth. No key recovery needed — the algorithm is self-inverting once the linear structure is identified.
+
+```python
+def decrypt(ciphertext):
+    out = bytearray()
+    for i in range(0, len(ciphertext), 16):
+        for j in range(4):
+            xorsum = 0
+            for k in range(4):
+                if k != j:
+                    for l in range(i + k*4, i + k*4 + 4):
+                        xorsum ^= ciphertext[l]
+            for m in range(i + j*4, i + j*4 + 4):
+                out.append(ciphertext[m] ^ xorsum)
+    return bytes(out)
+```
+
+**Key insight:** Any unkeyed cipher built from XOR-only operations over fixed-size blocks is a linear system. If each output bit is a linear combination of input bits, invert by solving for the dependent lane — no key or brute force required.
+
+**References:** h4ckc0n 2018 — writeup 10806
+
+---
+
+## Flag Semaphore Photo Decoding (DefCamp CTF 2018)
+
+**Pattern:** Challenge provides photos of a person holding flags in fixed positions. Map each pose to a letter using the standard flag semaphore chart (8 compass directions × 2 arms = ~32 letters). Two special poses — `J` (shift to "letters") and `#` (shift to "numbers") — switch between modes; maintain a mode flag while decoding.
+
+```python
+SEMAPHORE = {
+    ('NW','N'): 'A', ('NW','NE'): 'B', ('NW','E'): 'C', ('NW','SE'): 'D',
+    # ... full table on Wikipedia
+    ('N','NE'):  'J',  # letters shift
+    ('NE','SE'): '#',  # numbers shift
+}
+letters = [SEMAPHORE[pose] for pose in pose_sequence]
+```
+
+**Key insight:** Semaphore is often disguised as "person dancing" or "art installation" photos. The presence of exactly two outstretched limbs per frame is the tell.
+
+**References:** DefCamp CTF 2018 — Multiple Flags, writeup 12005
+
+---
+
+## Two-Byte Nibble Reassembly with Random Padding (Trend Micro 2018)
+
+**Pattern:** Custom encoding outputs two bytes for every input byte, where each input byte is split into high and low nibbles, and each nibble is padded with a random high nibble. Recover the original by masking low nibbles and recombining.
+
+```python
+def decode(src):
+    return bytes(((src[2*i] & 0xf) << 4) | (src[2*i+1] & 0xf)
+                 for i in range(len(src)//2))
+```
+
+**Key insight:** Random padding in the *high* nibble can be ignored entirely — only the low nibbles carry signal. Spot the pattern when the encoded length is exactly 2x the plaintext length and histograms show uniform high-nibble distribution.
+
+**References:** Trend Micro CTF 2018 — J1, writeup 12874

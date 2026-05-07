@@ -19,6 +19,11 @@
 - [Time-Locked Binary with Date-Based Key (Hack.lu 2017)](#time-locked-binary-with-date-based-key-hacklu-2017)
 - [ARM Code in Image Pixels via UnicornJS (Hack.lu 2017)](#arm-code-in-image-pixels-via-unicornjs-hacklu-2017)
 - [x86 16-bit MBR psadbw Constraint Solving (CSAW 2017)](#x86-16-bit-mbr-psadbw-constraint-solving-csaw-2017)
+- [TensorFlow DNN Inversion by Inverting Sigmoid Layers (N1CTF 2018)](#tensorflow-dnn-inversion-by-inverting-sigmoid-layers-n1ctf-2018)
+- [BPF Filter Analysis via JIT Compilation to x64 Assembly (Midnight Sun CTF 2018)](#bpf-filter-analysis-via-jit-compilation-to-x64-assembly-midnight-sun-ctf-2018)
+- [Single-Byte XOR ROM Deobfuscation Sweep (X-MAS CTF 2018)](#single-byte-xor-rom-deobfuscation-sweep-x-mas-ctf-2018)
+- [WebKit Array.slice OOB CVE-2016-4622 (Codegate 2019)](#webkit-arrayslice-oob-cve-2016-4622-codegate-2019)
+- [Multi-Modulus CRT Keygen with Matrix Lookup Password (Pragyan CTF 2019)](#multi-modulus-crt-keygen-with-matrix-lookup-password-pragyan-ctf-2019)
 
 ---
 
@@ -661,6 +666,131 @@ def solve_psadbw_group(known_constants, expected_sum, printable_range=(0x20, 0x7
 **Key insight:** `psadbw` creates sum-of-absolute-difference equations — not purely linear but solvable with constrained brute-force when bytes are limited to printable ASCII. Each 2-byte group is independent, keeping the search space to 95^2 = ~9000 candidates per group.
 
 **References:** CSAW CTF 2017
+
+---
+
+## TensorFlow DNN Inversion by Inverting Sigmoid Layers (N1CTF 2018)
+
+**Pattern:** Binary implements a 5-layer deep neural network with sigmoid activation. The input (flag characters) is transformed as `1.0/char_value` before feeding into the network. Extract weights and biases from the binary, then compute the inverse layer-by-layer: apply inverse-sigmoid, subtract bias, multiply by weight matrix inverse.
+
+```python
+import numpy as np
+
+def sigmoid_inv(x):
+    return -np.log(1.0/x - 1.0)
+
+# Invert layer by layer from output to input
+v = target_output
+for i in range(num_layers - 1, -1, -1):
+    v = np.dot(sigmoid_inv(v) - biases[i], np.linalg.inv(weights[i]))
+
+# Input was 1.0/char, so flag chars are the multiplicative inverse
+flag = ''.join(chr(int(round(1.0 / v[j]))) for j in range(len(v)))
+```
+
+**Key insight:** Neural networks with invertible activation functions (sigmoid, tanh) and square weight matrices can be mathematically inverted layer-by-layer. Apply inverse-sigmoid, subtract bias, multiply by weight inverse. Watch for input transformations (e.g., 1/x) that must also be inverted.
+
+**Detection:** Binary with TensorFlow or custom DNN implementation. Look for sigmoid/tanh calls, matrix multiplications, and hardcoded float arrays (weights/biases) in `.rodata`. Square weight matrices (N x N) indicate the network is invertible.
+
+**References:** N1CTF 2018
+
+---
+
+## BPF Filter Analysis via JIT Compilation to x64 Assembly (Midnight Sun CTF 2018)
+
+**Pattern:** Binary creates a raw socket with a BPF (Berkeley Packet Filter) attached. When standard BPF disassemblers fail to produce readable output, enable the kernel's BPF JIT compiler to convert BPF bytecode to native x64 assembly, then read the compiled code from dmesg.
+
+```bash
+# Enable BPF JIT compilation
+echo 1 > /proc/sys/net/core/bpf_jit_enable
+
+# Run the binary, then read JIT-compiled BPF from kernel log
+dmesg | grep -A 100 "flen="
+
+# Analysis revealed: expects DNS TXT query on UDP port 3333
+dig @target -p 3333 'M4d!bKn3~l' TXT
+```
+
+**Key insight:** Linux can JIT-compile BPF filters to native x64 machine code. When standard BPF disassemblers fail or produce unreadable output, enable `bpf_jit_enable` and read the compiled assembly from dmesg. The native code is often easier to understand than BPF bytecode.
+
+**Detection:** Binary using `setsockopt` with `SO_ATTACH_FILTER`, raw socket creation (`socket(AF_PACKET, ...)`), or embedded `struct sock_fprog` structures. BPF programs appear as arrays of `struct sock_filter` (8 bytes each: opcode, jt, jf, k).
+
+**References:** Midnight Sun CTF 2018
+
+---
+
+## Single-Byte XOR ROM Deobfuscation Sweep (X-MAS CTF 2018)
+
+**Pattern:** A large opaque blob (GBA ROM, firmware, game binary) refuses `binwalk`/`file` identification. Sweep all 256 single-byte XOR keys and re-run `file` + `strings` over the outputs; the correct key reveals a recognisable magic/signature.
+
+```bash
+for i in $(seq 0 255); do
+  python3 -c "
+import sys
+k = $i
+d = open('blob.bin','rb').read()
+open(f'xor_{k}','wb').write(bytes(b^k for b in d))" 
+  file "xor_$i" | grep -v data
+done
+strings "xor_0x42" | grep -i "POKEMON\|ELF\|MZ"
+```
+
+**Key insight:** Brute-forcing 256 XOR keys costs seconds and defeats any single-byte XOR packer. Always run this sweep before assuming a custom algorithm; look for format magics (`ELF`, `PK`, `MZ`, `PDF-`, ROM name strings) in the output.
+
+**References:** X-MAS CTF 2018 — Unown Gift, writeup 12665
+
+---
+
+## WebKit Array.slice OOB CVE-2016-4622 (Codegate 2019)
+
+**Pattern:** Challenge ships a WebKit binary with the `isJSArray(thisObj) && length == toLength(...)` bounds check commented out inside `ArrayPrototype.cpp`. `Array.prototype.slice` then reads beyond the backing store, giving OOB into adjacent JS objects. Chain Saelo's `addrof` / `fakeobj` primitives to obtain arbitrary read/write in the JS heap, then pivot to native code via a fake `StructureID`.
+
+```javascript
+let oob = new Array(8);
+let victim = {a: 1};
+let leak = oob.slice(-1, oob.length + 16)[0];  // reads past backing store
+```
+
+**Key insight:** Any JIT/engine challenge that patches out a safety check almost always exposes a classic browser-CVE primitive. Diff the vendored source against upstream `ArrayPrototype.cpp`, `JSArray.cpp`, and `JITOperations.cpp` for removed `if`/`assert` statements — that's the bug.
+
+**References:** Codegate CTF 2019 — Butterfree, writeup 12902
+
+---
+
+## Multi-Modulus CRT Keygen with Matrix Lookup Password (Pragyan CTF 2019)
+
+**Pattern (Super Secure Vault):** `main` asks for a numeric `key` (<= 30 digits) and checks it against five independent modular equations derived from slicing a hardcoded big number `N = "27644437104591489104652716127"` into `[27644437, 10459, 1489, 1046527, 16127]`:
+
+```
+key mod 27644437 == 213
+key mod 10459    == 229
+key mod 1489     == 25
+key mod 1046527  == 83
+key mod 16127    == 135
+```
+
+The five moduli are pairwise coprime, so the Chinese Remainder Theorem yields the smallest valid `key = 3087629750608333480917556`. After `scanf`, `func2(password, key, N)` concatenates `key + N + "80"` into `v12`, then validates each password byte against a 10000-byte lookup table:
+
+```python
+# Round 1: index = 100*(10*d0 + d1) + 10*d_mid + d_mid+1
+# Round 2: index = 100*((10*d0+d1)**2 % 97) + ((10*d_mid+d_mid+1)**2 % 97)
+password = b""
+v8, v10 = 0, len(v12) // 2
+while v8 < len(v12) // 2:
+    idx = 100 * (10*v12[v8] + v12[v8+1]) + 10*v12[v10] + v12[v10+1]
+    password += bytes([matrix[idx]]); v8 += 2; v10 += 2
+v9, v11 = 0, len(v12) // 2
+while v9 < len(v12) // 2:
+    a = 10*v12[v9] + v12[v9+1]; b = 10*v12[v11] + v12[v11+1]
+    password += bytes([matrix[100*(a*a % 97) + b*b % 97]])
+    v9 += 2; v11 += 2
+```
+
+CRT (via `sympy.ntheory.modular.crt` or a manual `mul_inv` routine) plus `matrix` dumped from the binary reproduces the flag `pctf{R3v3rS1Ng_#s_h311_L0t_Of_Fun}`.
+
+**Key insight:** Five coprime moduli pin the key down uniquely modulo their product (~4.7e19), which fits in a 30-digit input — pick the smallest representative instead of brute-forcing, otherwise you waste hours on 100k+ equally valid but ugly keys. The second stage looks complicated but is really a pair of fixed index-generator functions over a static table; dump the table once and both rounds become direct array reads.
+
+**References:** Pragyan CTF 2019 — Super Secure Vault, writeup 13760
 
 ---
 

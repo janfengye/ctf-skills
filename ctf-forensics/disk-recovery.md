@@ -16,6 +16,11 @@
 - [Corrupted ZIP Repair via Header Field Manipulation (PlaidCTF 2017)](#corrupted-zip-repair-via-header-field-manipulation-plaidctf-2017)
 - [Recovering Deleted .git Repository from FAT Image (Square CTF 2017)](#recovering-deleted-git-repository-from-fat-image-square-ctf-2017)
 - [DNSSEC Key Recovery from Git Commit History (Hack.lu 2017)](#dnssec-key-recovery-from-git-commit-history-hacklu-2017)
+- [XZ Stream Header Repair via CRC32 Reconstruction (Hackover 2018)](#xz-stream-header-repair-via-crc32-reconstruction-hackover-2018)
+- [ZipCrypto Known-Plaintext Cracking via bkcrack (Codegate 2019)](#zipcrypto-known-plaintext-cracking-via-bkcrack-codegate-2019)
+- [SQLite Serial-Type Byte Forensics (RITSEC 2018)](#sqlite-serial-type-byte-forensics-ritsec-2018)
+- [Recursive Binwalk Chain PNG->PDF->DOCX->PNG->Base64 (TAMUctf 2019)](#recursive-binwalk-chain-png-pdf-docx-png-base64-tamuctf-2019)
+- [Regex-Password Nested Zip Chain with exrex (UTCTF 2019)](#regex-password-nested-zip-chain-with-exrex-utctf-2019)
 - [See Also](#see-also)
 
 ---
@@ -551,6 +556,140 @@ dnssec-signzone -K /path/to/keys -o example.com zone.db
 ```
 
 **Key insight:** Sensitive cryptographic key material in git history is permanently recoverable — `git log --diff-filter=D` finds all commits that deleted files, and `git show <commit>^:<path>` retrieves the file's state just before deletion. DNSSEC private keys enable forging any DNS record for the zone, allowing DNS cache poisoning or redirecting traffic to attacker-controlled servers.
+
+---
+
+## XZ Stream Header Repair via CRC32 Reconstruction (Hackover 2018)
+
+**Pattern:** The file has a valid XZ stream footer but the stream header has been overwritten (commonly with `PK\x03\x04` to make it look like a ZIP). Rebuild the 12-byte XZ header from the format spec: magic `FD 37 7A 58 5A 00`, two bytes of stream flags, and a 4-byte little-endian CRC32 of those flags. Prepend the reconstructed header to the rest of the file and `xz -d` decompresses cleanly.
+
+```bash
+# 1. Confirm the footer — XZ stream footer magic is "YZ" at the end.
+xxd broken.xz | tail -1
+# 00002ff0: 00 00 01 59 5A  ...YZ
+
+# 2. Read stream_flags from the footer (byte at offset -6 from EOF)
+STREAM_FLAGS=$(xxd -p -s -6 -l 2 broken.xz)
+# e.g. 00 04  → CHECK_CRC64
+
+# 3. Compute CRC32 of the 2 flag bytes (little-endian output)
+CRC=$(python3 -c "import binascii; print(binascii.crc32(bytes.fromhex('$STREAM_FLAGS')).to_bytes(4,'little').hex())")
+
+# 4. Rebuild the header and replace the first 12 bytes
+printf '\xFD7zXZ\x00' > newhdr.bin
+printf '%s' "$STREAM_FLAGS" | xxd -r -p >> newhdr.bin
+printf '%s' "$CRC"          | xxd -r -p >> newhdr.bin
+dd if=newhdr.bin of=broken.xz bs=1 count=12 conv=notrunc
+
+# 5. Decompress
+xz -d broken.xz
+```
+
+**Key insight:** XZ streams are defined by a fixed 12-byte header and a 12-byte footer that both include the same `stream_flags` byte — when the header is damaged you can copy the flags out of the still-intact footer and recompute the header CRC32 locally. The same header-reconstruction trick works for any format where the checksum input is small enough to brute-force or derive from the footer: GZIP (trailing `isize`/`crc32`), ZIP (central directory before the local file header), and zstd (frame header with skip-frames). When the challenge hands you a blob whose magic bytes belong to the wrong format, check the **last few bytes** for the real footer signature before trying to salvage the header.
+
+**References:** Hackover CTF 2018 — UnbreakMyStart, writeup 11508
+
+---
+
+## ZipCrypto Known-Plaintext Cracking via bkcrack (Codegate 2019)
+
+**Pattern:** ZipCrypto (the legacy PKZIP stream cipher, not AES-256) falls to known-plaintext attacks when you have at least 12 bytes of known plaintext for an encrypted file. `pkcrack` is the classic tool but often fails on modern archives; `bkcrack` (https://github.com/kimci86/bkcrack) handles edge cases with partial headers.
+
+```bash
+# Extract any unencrypted neighbour and its encrypted version
+unzip secret.zip unencrypted_known.txt
+bkcrack -C secret.zip -c target.txt -p unencrypted_known.txt -P known.zip
+# Decrypt the whole archive with the recovered internal state
+bkcrack -C secret.zip -k <k0> <k1> <k2> -d target_decrypted.bin
+```
+
+**Key insight:** ZIP headers often include well-known constants (PNG/JPEG magic, empty `README.txt`, `.gitignore`). Any encrypted ZIP that also ships an unencrypted reference file — or where you can guess 12+ bytes of header — falls immediately to `bkcrack`. Swap to it when `pkcrack` throws.
+
+**References:** Codegate CTF 2019 — Rich Project, writeup 12907
+
+---
+
+## SQLite Serial-Type Byte Forensics (RITSEC 2018)
+
+**Pattern:** Two near-identical SQLite files differ only in selected bytes. SQLite records encode each column with a "serial type" varint that both describes the type and carries the length (types ≥13 mean strings, length `(type - 13) / 2`). Walk the records, locate the changed serial-type bytes between versions, and read the adjacent text payload to recover hidden characters.
+
+```python
+def extract_hidden(path):
+    with open(path, 'rb') as f: db = f.read()
+    offsets = [0x892, 0xBA5, 0xE13]   # diff the two files first
+    return bytes(db[off] for off in offsets)
+```
+
+**Key insight:** SQLite's varint serial-type scheme stores metadata *inline* with the payload, so an attacker who can flip one varint changes the interpretation of the next N bytes. Diff two versions byte-by-byte, cluster the diffs by record, and decode each varint to locate hidden text fields.
+
+**References:** RITSEC CTF 2018 — Lite Forensics, writeup 12223
+
+---
+
+## Recursive Binwalk Chain PNG->PDF->DOCX->PNG->Base64 (TAMUctf 2019)
+
+**Pattern:** One carrier file hides a chain of embedded documents — PNG with a PDF appended, the PDF embeds a DOCX (which is a ZIP), the DOCX embeds another PNG, and that PNG has Base64 appended after the IEND/EOF. Each layer changes container format to evade naive string searches.
+
+```bash
+# Layer 1-2: carve everything out of the outer PNG (pulls PDF, ZIP streams, etc.)
+binwalk --dd=".*" art.png
+cd _art.png.extracted
+file *                      # identify the Microsoft Word 2007+ blob
+
+# Layer 3: DOCX is a ZIP archive
+unzip 34591D -d docx/        # hex offset from binwalk becomes the filename
+ls docx/word/media/          # image1.png is the next-layer carrier
+
+# Layer 4: recurse binwalk into the inner PNG to pull an embedded PDF
+binwalk --dd=".*" docx/word/media/image1.png
+
+# Layer 5: check for data appended after %%EOF of the inner PDF
+strings _image1.png.extracted/*.pdf | tail -n 10
+# -> ZmxhZ3tQMGxZdEByX0QwX3kwdV9HM3RfSXRfTjB3P30K
+echo 'ZmxhZ3tQMGxZdEByX0QwX3kwdV9HM3RfSXRfTjB3P30K' | base64 -d
+```
+
+**Key insight:** When `grep flag` on the outermost file fails, assume each extracted file is itself a carrier. DOCX/XLSX/PPTX/APK/JAR are all ZIPs, so `unzip` works directly. PDFs commonly carry data *after* the final `%%EOF`, so always `strings | tail` or seek past the trailer. `binwalk --dd=".*"` writes every signature hit to disk so you can recurse with minimal typing.
+
+**References:** TAMUctf 2019 — I Heard You Like Files, writeups 13412 and 13587
+
+---
+
+## Regex-Password Nested Zip Chain with exrex (UTCTF 2019)
+
+**Pattern:** Outer zip contains a `hint.txt` (regex) and `archive.zip`; the regex enumerates the password set for the inner zip. Each extracted zip produces the next regex hint. Chain is deep (1000+ layers) so it must be scripted. `exrex.generate(regex)` materialises every string matching a regex, which is perfect for constrained password spaces.
+
+```python
+import exrex, zipfile, os
+
+hint = r'^  7  y  RU[A-Z]KKx2 R4\d[a-z]B  N$'
+archive = 'RegularZips.zip'
+
+for i in range(10000):
+    candidates = list(exrex.generate(hint))
+    out_dir = f'layer{i}'
+    os.makedirs(out_dir, exist_ok=True)
+    with zipfile.ZipFile(archive) as zf:
+        for pw in candidates:
+            try:
+                zf.extractall(out_dir, pwd=pw.encode())
+                print(f'[{i}] pw={pw}')
+                break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError(f'no password matched regex at layer {i}')
+    with open(os.path.join(out_dir, 'hint.txt')) as f:
+        hint = f.read().strip()
+    archive = os.path.join(out_dir, 'archive.zip')
+    if not os.path.exists(archive):
+        print('FLAG IN', out_dir)
+        break
+```
+
+**Key insight:** When a zip's password is described by a regex, don't brute ASCII — use `exrex` to enumerate only matching strings (often just a handful of candidates per layer). Automate the extract-read-hint-repeat cycle; 1000 layers finish in seconds because the search space per layer is tiny.
+
+**References:** UTCTF 2019 — Regular Zips, writeups 13951 and 13861
 
 ---
 

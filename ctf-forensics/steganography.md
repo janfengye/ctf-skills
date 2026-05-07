@@ -22,6 +22,10 @@ Non-image steganography techniques (PDF, SVG, terminal, text, compression, sprea
 - [Multi-Stream Video Container Steganography (BSidesSF 2026)](#multi-stream-video-container-steganography-bsidessf-2026)
 - [APNG (Animated PNG) Frame Extraction (IceCTF 2016)](#apng-animated-png-frame-extraction-icectf-2016)
 - [PNG Height/CRC Manipulation for Hidden Content (H4ckIT CTF 2016)](#png-heightcrc-manipulation-for-hidden-content-h4ckit-ctf-2016)
+- [QR Code Reconstruction from Curved Glass Reflection in Video (PlaidCTF 2018)](#qr-code-reconstruction-from-curved-glass-reflection-in-video-plaidctf-2018)
+- [GIF Palette Manipulation for QR Code Reconstruction (3DSCTF 2017)](#gif-palette-manipulation-for-qr-code-reconstruction-3dsctf-2017)
+- [Angecryption: AES-CBC Encrypting One Valid File into Another (34C3 CTF 2017)](#angecryption-aes-cbc-encrypting-one-valid-file-into-another-34c3-ctf-2017)
+- [SVG Micro-Coordinate Steganography (SharifCTF 8)](#svg-micro-coordinate-steganography-sharifctf-8)
 
 ---
 
@@ -577,3 +581,114 @@ xortool -c ff layer.bin
 **Shortcut:** Open the raw PNG bytes as a raw image in GraphBitStreamer (32 bpp, width matching original). Weak XOR encryption preserves visual patterns (like ECB-encrypted images), making the flag readable without full decryption.
 
 **Key insight:** Custom PNG chunks (non-standard 4-letter types) often contain hidden data. The PNG spec allows arbitrary ancillary chunks — parsers ignore unknown types. When multiple layers use different XOR keys, each must be cracked independently using frequency analysis. The shortcut works because XOR with a short repeating key preserves large-scale pixel patterns, similar to ECB mode's visual leakage.
+
+---
+
+### QR Code Reconstruction from Curved Glass Reflection in Video (PlaidCTF 2018)
+
+**Pattern:** QR code visible only as a curved reflection on a glass sphere in surveillance footage (~100px wide). Manual reconstruction required flipping, de-warping, identifying as Version 2 (25x25), decoding format string for ECC level, and pixel-by-pixel reconstruction using known flag prefix to fix initial data bytes.
+
+**Steps:**
+1. Extract best frame from video, crop the reflection
+2. Flip horizontally (mirror reflection) and apply de-warping
+3. Identify QR version (25x25 = Version 2) and decode format bits for ECC level and mask pattern
+4. Begin manual pixel transcription of the 25x25 grid
+5. When initial decode fails, use known plaintext (flag prefix "PCTF{") to fix first data bytes
+6. High ECC level (Q = 25% recovery) corrects remaining pixel errors
+
+```python
+from PIL import Image
+import numpy as np
+
+# Step 1: Extract and flip the reflection
+frame = Image.open('best_frame.png')
+reflection = frame.crop((x1, y1, x2, y2))
+flipped = reflection.transpose(Image.FLIP_LEFT_RIGHT)
+
+# Step 2: Scale up for manual transcription
+scaled = flipped.resize((500, 500), Image.NEAREST)
+scaled.save('reflection_scaled.png')
+
+# Step 3: Manual 25x25 grid transcription (Version 2 QR)
+# After manual pixel identification, create the QR matrix
+qr_matrix = np.zeros((25, 25), dtype=np.uint8)
+# Fill in identified modules from visual inspection...
+# qr_matrix[row][col] = 1  # dark module
+# qr_matrix[row][col] = 0  # light module
+
+# Step 4: Render as clean QR image for scanning
+cell_size = 20
+qr_img = Image.new('L', (25 * cell_size, 25 * cell_size), 255)
+for r in range(25):
+    for c in range(25):
+        if qr_matrix[r][c]:
+            for dy in range(cell_size):
+                for dx in range(cell_size):
+                    qr_img.putpixel((c * cell_size + dx, r * cell_size + dy), 0)
+qr_img.save('reconstructed_qr.png')
+
+# Step 5: Scan with zbarimg or use known prefix to fix errors
+# zbarimg reconstructed_qr.png
+```
+
+**Key insight:** QR codes with high ECC levels (Q or H) can tolerate significant reconstruction errors. When a QR code is partially visible (reflection, damage, low resolution), manually reconstruct what you can, use known plaintext to fix early data modules, and let ECC correct the rest.
+
+---
+
+### GIF Palette Manipulation for QR Code Reconstruction (3DSCTF 2017)
+
+GIF with 108,900 single-pixel frames. Each frame has identical pixel data but different palette entries. Map palette color to black/white to reconstruct a 330x330 QR code:
+
+```python
+from PIL import Image
+gif = Image.open('challenge.gif')
+width = int(gif.n_frames ** 0.5)  # sqrt(108900) = 330
+pixels = []
+for i in range(gif.n_frames):
+    gif.seek(i)
+    palette = gif.getpalette()
+    # First palette entry: yellow=(255,255,0) or green=(0,255,0)
+    pixels.append(0 if palette[0] > 128 else 255)  # black or white
+
+out = Image.new('L', (width, width))
+out.putdata(pixels)
+out.save('qr.png')
+# zbarimg qr.png
+```
+
+**Key insight:** GIF frames with identical pixel data but different color palettes encode binary data through palette manipulation. The number of frames is a perfect square, giving the side length of the hidden image. Each frame represents one pixel; the palette's first entry determines its color. When a GIF has an unusually large number of frames whose count is a perfect square, check for palette-based encoding.
+
+---
+
+### Angecryption: AES-CBC Encrypting One Valid File into Another (34C3 CTF 2017)
+
+Based on Ange Albertini's technique: a crafted AES-CBC key and IV can encrypt one valid image file into another valid image file:
+
+```python
+from Crypto.Cipher import AES
+key = bytes.fromhex('...')  # provided or recovered
+iv = bytes.fromhex('...')
+aes = AES.new(key, AES.MODE_CBC, iv)
+encrypted = aes.encrypt(open('flag.png', 'rb').read())
+# encrypted is ALSO a valid PNG (a mask image)
+# Overlay the mask on the original to reveal hidden content
+```
+
+**Key insight:** Angecryption exploits the fact that file format headers have enough degrees of freedom to survive AES-CBC encryption with chosen key/IV. The technique crafts the IV so that decrypting the "mask" file header produces a valid "flag" file header. When you find two valid image files and an AES key/IV in a challenge, try encrypting one — the result may be the other, and visual comparison reveals the flag.
+
+---
+
+### SVG Micro-Coordinate Steganography (SharifCTF 8)
+
+SVG contains a visible graphic plus a second `<g>` element with extremely small coordinate values (e.g., 450.xxxxx, 835.xxxxx). Apply SVG transform to zoom in:
+
+```xml
+<svg viewBox="448.75 834.69 2 2" width="2000" height="2000">
+  <!-- or apply transform: -->
+  <g transform="scale(200, 200) translate(-448.75, -834.69)">
+    <!-- hidden content becomes visible -->
+  </g>
+</svg>
+```
+
+**Key insight:** SVG coordinates with many decimal places hide micro-scale drawings invisible at normal zoom. Check for `<g>` elements with coordinate values that cluster in a tiny range. The fractional parts of the coordinates define the hidden image. Scale up by 100-1000x and translate to the cluster center to reveal. When SVG file size is unexpectedly large for the visible content, inspect coordinate precision in `<path>`, `<line>`, or `<g>` elements.

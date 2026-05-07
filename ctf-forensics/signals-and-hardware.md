@@ -10,11 +10,13 @@
 - [Flipper Zero .sub File (0xFun 2026)](#flipper-zero-sub-file-0xfun-2026)
 - [Keyboard Acoustic Side-Channel (ApoorvCTF 2026)](#keyboard-acoustic-side-channel-apoorvctf-2026)
 - [CD Audio Disc Image Steganography (BSidesSF 2026)](#cd-audio-disc-image-steganography-bsidessf-2026)
+- [Caps-Lock LED Morse Code Extraction from Video (STEM CTF 2018)](#caps-lock-led-morse-code-extraction-from-video-stem-ctf-2018)
 - [Linux input_event Keylogger Dump Parsing (Pwn2Win 2016)](#linux-input_event-keylogger-dump-parsing-pwn2win-2016)
 - [I2C Bus Protocol Decoding (EKOPARTY CTF 2016)](#i2c-bus-protocol-decoding-ekoparty-ctf-2016)
 - [IBM-29 Punched Card OCR (EKOPARTY CTF 2016)](#ibm-29-punched-card-ocr-ekoparty-ctf-2016)
 - [Serial UART Data Decoding from WAV Audio (EasyCTF 2017)](#serial-uart-data-decoding-from-wav-audio-easyctf-2017)
 - [USB MIDI Launchpad Traffic Reconstruction (Sthack 2017)](#usb-midi-launchpad-traffic-reconstruction-sthack-2017)
+- [Tektronix Logic-Analyzer CSV Clock-Edge Extraction (35C3 2018)](#tektronix-logic-analyzer-csv-clock-edge-extraction-35c3-2018)
 
 ---
 
@@ -432,6 +434,56 @@ img.save('disc_output.png')
 
 ---
 
+## Caps-Lock LED Morse Code Extraction from Video (STEM CTF 2018)
+
+**Pattern:** Extract Morse code from a security camera video by tracking the caps-lock LED pixel on a keyboard using OpenCV frame-by-frame analysis.
+
+```python
+import cv2
+
+vidcap = cv2.VideoCapture('SecurityCamera.mp4')
+morse = []
+while vidcap.isOpened():
+    ret, frame = vidcap.read()
+    if not ret: break
+    r, g, b = frame[58, 686]  # caps-lock LED pixel coordinate
+    is_on = r > 200 and g > 200 and b > 200
+    morse.append(is_on)
+
+# Convert on/off durations to dots, dashes, and spaces
+# Short on = dot, long on = dash, medium off = letter space, long off = word space
+durations = []
+current = morse[0]
+count = 0
+for state in morse:
+    if state == current:
+        count += 1
+    else:
+        durations.append((current, count))
+        current = state
+        count = 1
+durations.append((current, count))
+
+# Calibrate thresholds from observed durations
+# Typical: dot=2-4 frames, dash=6-10 frames, letter gap=4-6 frames, word gap=10+ frames
+MORSE_MAP = {
+    '.-': 'A', '-...': 'B', '-.-.': 'C', '-..': 'D', '.': 'E',
+    '..-.': 'F', '--.': 'G', '....': 'H', '..': 'I', '.---': 'J',
+    '-.-': 'K', '.-..': 'L', '--': 'M', '-.': 'N', '---': 'O',
+    '.--.': 'P', '--.-': 'Q', '.-.': 'R', '...': 'S', '-': 'T',
+    '..-': 'U', '...-': 'V', '.--': 'W', '-..-': 'X', '-.--': 'Y',
+    '--..': 'Z', '.----': '1', '..---': '2', '...--': '3',
+    '....-': '4', '.....': '5', '-....': '6', '--...': '7',
+    '---..': '8', '----.': '9', '-----': '0',
+}
+```
+
+**Key insight:** Keyboard LEDs (caps lock, num lock, scroll lock) can be programmatically controlled and are visible in security camera footage. Track a specific pixel coordinate across video frames; on/off durations encode Morse code (short=dot, long=dash).
+
+**Detection:** Video of a keyboard where an LED blinks irregularly. Challenge mentions "security camera", "keyboard", "blinking", or "Morse".
+
+---
+
 ## Linux input_event Keylogger Dump Parsing (Pwn2Win 2016)
 
 Raw binary dump with 24-byte repeating structure matching Linux's `struct input_event` (`struct timeval` + `__u16 type` + `__u16 code` + `__s32 value`). Filter for `type == EV_KEY (1)` and `value == 1` (key press), map keycodes via Linux kernel's `input-event-codes.h`.
@@ -634,3 +686,28 @@ for pkt in pkts:
 **Key insight:** MIDI devices use standardized message formats. Novation Launchpad maps its 8x8 grid to MIDI notes where `key = row*16 + col`. Note On (0x90) with velocity > 0 = button lit, Note Off (0x80) = button off. Sequences of all-off messages separate characters displayed on the grid.
 
 **Detection:** USB PCAP with bulk transfer packets containing 3-byte or 4-byte payloads. USB device descriptor shows MIDI class (Audio class, subclass MIDI Streaming). Challenge mentions "MIDI", "Launchpad", "music controller", or "grid".
+
+---
+
+## Tektronix Logic-Analyzer CSV Clock-Edge Extraction (35C3 2018)
+
+**Pattern:** Tektronix logic analyzers export multi-channel captures as ~10-MB CSV files with one column per signal (CLK, R, G, B, ...). Parse the file with Python, detect rising edges on the CLK column, and sample the data columns at each edge to reconstruct the transmitted image/stream.
+
+```python
+import csv
+with open('capture.csv') as f:
+    reader = csv.reader(f)
+    prev_clk = 0
+    bits = []
+    for row in reader:
+        try: clk = int(row[1])
+        except ValueError: continue
+        if prev_clk == 0 and clk == 1:          # rising edge
+            bits.append((int(row[2]), int(row[3]), int(row[4])))
+        prev_clk = clk
+# Reshape bits into image and render with PIL
+```
+
+**Key insight:** Logic-analyzer CSV is always edge-sampled. Identify the clock column by its 50%-duty cycle, then sample the data columns synchronously at every rising edge. Works for any synchronous bus (RGB, SPI, I²C clock line).
+
+**References:** 35C3 CTF 2018 — box of blink, writeup 12907

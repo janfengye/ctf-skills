@@ -13,8 +13,11 @@ See also: [stego-advanced-2.md](stego-advanced-2.md) for video frame techniques,
 - [Audio FFT Musical Note Identification (BYPASS CTF 2025)](#audio-fft-musical-note-identification-bypass-ctf-2025)
 - [Audio Metadata Octal Encoding (BYPASS CTF 2025)](#audio-metadata-octal-encoding-bypass-ctf-2025)
 - [Nested Tar Archive with Whitespace Encoding (UTCTF 2026)](#nested-tar-archive-with-whitespace-encoding-utctf-2026)
+- [DeepSound Audio Steganography with Password Cracking (INShAck 2018)](#deepsound-audio-steganography-with-password-cracking-inshack-2018)
 - [Audio Waveform Binary Encoding (BackdoorCTF 2013)](#audio-waveform-binary-encoding-backdoorctf-2013)
 - [Audio Spectrogram Hidden QR Code (BaltCTF 2013)](#audio-spectrogram-hidden-qr-code-baltctf-2013)
+- [Byte-Reversed .docx ZIP Bidirectional Archive (Security Fest CTF 2018)](#byte-reversed-docx-zip-bidirectional-archive-security-fest-ctf-2018)
+- [MIDI Note-On/Note-Off Pitch Pair Encoding (X-MAS CTF 2018)](#midi-note-onnote-off-pitch-pair-encoding-x-mas-ctf-2018)
 
 ---
 
@@ -345,6 +348,50 @@ print(message.decode(errors='replace'))
 
 ---
 
+## DeepSound Audio Steganography with Password Cracking (INShAck 2018)
+
+**Pattern:** Two-phase audio steganography: part 1 visible in Audacity spectrogram, part 2 hidden with DeepSound tool (password-protected). Use `deepsound2john.py` to extract the hash, crack with John, then retrieve hidden files.
+
+```bash
+# Phase 1: Check spectrogram for visible text
+sox audio.wav -n spectrogram -o spec.png
+
+# Phase 2: Extract DeepSound password hash
+python3 deepsound2john.py audio.wav > hash.txt
+
+# Crack password
+john --wordlist=rockyou.txt hash.txt
+
+# Extract hidden file with DeepSound GUI or CLI using cracked password
+```
+
+**DeepSound detection:**
+```python
+# DeepSound embeds a signature in WAV files
+# Check for DeepSound header pattern in audio data
+with open('audio.wav', 'rb') as f:
+    data = f.read()
+    # DeepSound uses specific byte patterns in the audio data section
+    # deepsound2john.py from John the Ripper's bleeding-jumbo branch
+    # handles detection and hash extraction automatically
+```
+
+**Tool installation:**
+```bash
+# deepsound2john.py is part of John the Ripper bleeding-jumbo
+git clone https://github.com/openwall/john.git
+# Script located at: john/run/deepsound2john.py
+
+# DeepSound GUI (Windows): http://jpinsoft.net/deepsound/
+# For Linux: run under Wine or use the extracted hash + john approach
+```
+
+**Key insight:** DeepSound embeds files in WAV audio with optional AES encryption. The password hash is extractable with `deepsound2john.py` from John the Ripper's bleeding-jumbo branch. Always check both spectrogram (visual stego) and DeepSound (data stego) in audio challenges.
+
+**Detection:** WAV file that seems normal but `deepsound2john.py` produces a hash. Challenge has two-part structure where first part is easy (spectrogram) and second part requires a tool. Challenge mentions "layers", "hidden", or "deep".
+
+---
+
 ## Audio Waveform Binary Encoding (BackdoorCTF 2013)
 
 **Pattern:** WAV file contains two distinct waveform shapes representing binary 0 and 1. Group 8 bits into bytes and decode as ASCII.
@@ -386,6 +433,49 @@ sox audio.mp3 -n spectrogram -o spec.png
 ```
 
 **Key insight:** Use Sonic Visualiser (Layer → Add Spectrogram) with adjustable window size and color mapping. QR codes or text often appear in the 2-15 kHz band. Multiple spectrogram fragments may need to be stitched together in an image editor before scanning.
+
+---
+
+## Byte-Reversed .docx ZIP Bidirectional Archive (Security Fest CTF 2018)
+
+**Pattern (Zion):** Distributed file is a valid `.docx` (ZIP archive). Extract it normally and you see only a decoy document. Reverse the entire file byte-for-byte and the result is *also* a valid ZIP archive — containing a second `word/media/*.png` whose contents are the flag.
+
+**Extraction:**
+```bash
+# Verify the forward archive
+unzip -l doc.docx
+
+# Reverse the byte stream and unpack the mirror archive
+python3 -c "import sys;sys.stdout.buffer.write(open('doc.docx','rb').read()[::-1])" > mirror.zip
+unzip -l mirror.zip
+unzip mirror.zip 'word/media/*' -d mirror/
+```
+
+**Why both directions succeed:** ZIP's central directory sits at the end of the archive and the local file headers are parsed only via offsets in that directory. By placing a second set of local headers at the *start* of the file, and a matching central directory at the very end after reversing, the file satisfies the ZIP specification in both reading orders. Python's `zipfile` and `unzip -l` read the central directory from the tail, so they happily open whichever end is presented first.
+
+**Key insight:** Always test container files for byte-reversal, bit-reversal, and byte-interleaving when the forward extraction yields only a decoy. Run `binwalk` on both the forward and reversed copies to surface embedded archives hidden in either direction. The trick generalizes to any format whose parser tolerates trailing garbage (ZIP, RAR, PDF, tar).
+
+**References:** Security Fest CTF 2018 — writeup 10204
+
+---
+
+## MIDI Note-On/Note-Off Pitch Pair Encoding (X-MAS CTF 2018)
+
+**Pattern:** MIDI file plays nothing recognisable but has a strict alternating Note-On/Note-Off pattern. The hidden message is split one byte per *pair*: `ord(char) = note_on_pitch + note_off_pitch`. Sometimes encoded as high/low nibble: `ord(char) = (on << 4) | off`.
+
+```python
+import mido
+mid = mido.MidiFile('hidden.mid')
+ons, offs = [], []
+for ev in mid.tracks[0]:
+    if ev.type == 'note_on':   ons.append(ev.note)
+    elif ev.type == 'note_off': offs.append(ev.note)
+flag = ''.join(chr(o + f) for o, f in zip(ons, offs))
+```
+
+**Key insight:** MIDI pitch values are 7-bit (0..127), so any byte can be split across two notes. When a MIDI sounds "atonal" but obeys strict note-pair alternation, test `on + off`, `(on<<4)|off`, `off - on`, and XOR combinations before assuming audio stego.
+
+**References:** X-MAS CTF 2018 — A Christmas Carol, writeup 12667
 
 ---
 

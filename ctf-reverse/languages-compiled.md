@@ -14,11 +14,17 @@
   - [Symbol Demangling](#symbol-demangling)
   - [Common Rust Patterns in Decompilation](#common-rust-patterns-in-decompilation)
   - [Rust-Specific Analysis Tools](#rust-specific-analysis-tools)
+  - [Rust Lifetime Escape via Compiler Bug #25860 (Hack.lu 2018)](#rust-lifetime-escape-via-compiler-bug-25860-hacklu-2018)
+  - [Rust #[no_mangle] libc Override for seccomp Bypass (Hack.lu 2018)](#rust-no_mangle-libc-override-for-seccomp-bypass-hacklu-2018)
+  - [Rust xmmword Constant Extraction via IDAPython (Insomnihack 2019)](#rust-xmmword-constant-extraction-via-idapython-insomnihack-2019)
+- [Nuitka-Compiled Python — Module Stub Injection (X-MAS CTF 2018)](#nuitka-compiled-python--module-stub-injection-x-mas-ctf-2018)
 - [Swift Binary Reversing](#swift-binary-reversing)
 - [Kotlin / JVM Binary Reversing](#kotlin--jvm-binary-reversing)
   - [JVM Bytecode (Android/Server)](#jvm-bytecode-androidserver)
   - [Kotlin/Native](#kotlinnative)
 - [D Language Binary Reversing (CSAW CTF 2016)](#d-language-binary-reversing-csaw-ctf-2016)
+- [Haskell Binary Reversing via STG Closures and hsdecomp (hxp CTF 2017, Codegate 2018)](#haskell-binary-reversing-via-stg-closures-and-hsdecomp-hxp-ctf-2017-codegate-2018)
+- [Haskell Binary RE via GHC CMM Intermediate Language (N1CTF 2018)](#haskell-binary-re-via-ghc-cmm-intermediate-language-n1ctf-2018)
 - [C++ Binary Reversing (Quick Reference)](#c-binary-reversing-quick-reference)
   - [vtable Reconstruction](#vtable-reconstruction)
   - [RTTI (Run-Time Type Information)](#rtti-run-time-type-information)
@@ -443,6 +449,86 @@ def reverse_d_cipher(encrypted, num_functions=500):
 
 ---
 
+### Haskell Binary Reversing via STG Closures and hsdecomp (hxp CTF 2017, Codegate 2018)
+
+GHC-compiled Haskell binaries use the STG (Spineless Tagless G-machine) execution model, making them notoriously difficult to reverse due to lazy evaluation, closures, and thunks. The STG machine turns everything into closure calls rather than direct function calls.
+
+**Recognition:**
+- Shared libraries: `libHSbase-*`, `libHSrts-*`
+- Entry symbol: `hs_main` (replaces standard `main`)
+- Mangled symbols use Z-encoding: `z` = prefix, `Z` = uppercase, `zd` = `.`, `zi` = `$`
+- GHC calling convention register mapping: `rbx` = R1, `r14` = R2
+
+**Closure structure:**
+Closures are structs where the first qword points to the info table/code. The info table precedes the code pointer and contains metadata (closure type, layout info, SRT).
+
+```bash
+# Identify Haskell binary
+ldd ./binary | grep libHS
+readelf -s ./binary | grep hs_main
+
+# Decompile with hsdecomp (github.com/gereeter/hsdecomp)
+# Recovers closure structure and pattern matching into pseudo-Haskell
+python2 hsdecomp ./binary
+
+# Compile reference for monkey-patching
+ghc -O0 reference.hs -o reference
+objcopy --dump-section .text=main_code reference
+```
+
+**Monkey-patching technique:**
+When decompilation fails or closures are opaque, compile a minimal Haskell program with the same GHC version, extract the compiled `Main_main_info` closure code, and patch it into the challenge binary. This forces evaluation of hidden closures and prints their results by replacing the main entry point with a known evaluator.
+
+```haskell
+-- reference.hs: minimal program that evaluates and prints the target closure
+module Main where
+main :: IO ()
+main = print targetClosure  -- replace with the closure you want to evaluate
+```
+
+**Key insight:** Haskell binaries are notoriously hard to reverse due to lazy evaluation, closures, and thunks. The STG machine turns everything into closure calls rather than direct function calls. `hsdecomp` recovers the closure structure and pattern matching. When decompilation fails, monkey-patching a known `Main_main_info` from a reference binary forces evaluation of hidden closures and prints results.
+
+**Detection:** `libHSbase-*` shared libraries, `hs_main` entry, Z-encoded symbols (e.g., `MainZCmain`), GHC version strings.
+
+**References:** hxp CTF 2017, Codegate 2018
+
+---
+
+### Haskell Binary RE via GHC CMM Intermediate Language (N1CTF 2018)
+
+GHC-compiled Haskell binaries are nearly impossible to decompile with IDA due to the STG execution model. When a `.cmm` (C-- intermediate) file is available or recoverable, read it to understand thunks, closures, and lazy evaluation semantics. For exponentially-growing recursive structures, compute segment sizes with memoization and use binary search instead of materializing the full string.
+
+**Pattern:** The binary builds a recursive string structure where `f(n) = s1 + f(n-1) + s2 + f(n-1) + s3`. Direct evaluation is `O(2^n)` in both time and space. Instead, compute the size of each recursion level with memoization, then binary-search for the target character index by walking the segment boundaries.
+
+```python
+# Haskell recursive string: f(n) = s1 + f(n-1) + s2 + f(n-1) + s3
+# Direct evaluation is O(2^n) -- use size memoization:
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def fsize(n):
+    if n == 0: return len(s0)
+    return len(s1) + fsize(n-1) + len(s2) + fsize(n-1) + len(s3)
+
+def char_at(n, offset):
+    if n == 0: return s0[offset]
+    if offset < len(s1): return s1[offset]
+    offset -= len(s1)
+    if offset < fsize(n-1): return char_at(n-1, offset)
+    offset -= fsize(n-1)
+    if offset < len(s2): return s2[offset]
+    offset -= len(s2)
+    return char_at(n-1, offset)
+```
+
+**Key insight:** GHC's CMM (C minus minus) intermediate representation preserves enough structure to identify algorithms. For recursive string constructions that double in size each level, compute segment sizes with memoization and binary-search for target indices instead of materializing the exponentially-growing string.
+
+**Detection:** Haskell binary (see recognition above) with a `.cmm` file included in the challenge distribution. Look for recursive closure applications that produce string-like data with exponential growth.
+
+**References:** N1CTF 2018
+
+---
+
 ## C++ Binary Reversing (Quick Reference)
 
 While C++ RE is well-covered by general tools, these patterns are CTF-specific:
@@ -487,3 +573,94 @@ std::map<K,V>:
 std::unordered_map<K,V>:
   Hash table: {bucket_array, size, load_factor_max, ...}
 ```
+
+---
+
+### Rust Lifetime Escape via Compiler Bug #25860 (Hack.lu 2018)
+
+**Pattern:** Rust compiler bug rust-lang/rust#25860 — higher-ranked lifetime variance was checked incorrectly, so a closure could "reborrow" a reference and unsoundly extend its lifetime to `'static`. In a Rust-only sandbox that runs safe code (no `unsafe` block) this bug yields a UAF primitive: alias a `Vec<u8>` heap buffer as a `(usize, usize, usize)` tuple and read/write past its end.
+
+```rust
+// Triggering pattern — safe Rust only
+fn extend<'a, 'b, T>(_: &'a &'b (), v: &'b T) -> &'a T { v }
+
+fn bad<T>(v: T) -> &'static T {
+    // Closure infers 'a = 'static because of the variance bug
+    let f: fn(&'_ &'_ (), &'_ T) -> &'_ T = extend;
+    f(&&(), &v) // returned ref now outlives v
+}
+
+fn main() {
+    let aliased: &'static Vec<u8> = bad(vec![1u8, 2, 3]);
+    // Reinterpret the Vec as its raw header: (ptr, len, cap)
+    let header: &(usize, usize, usize) =
+        unsafe { std::mem::transmute(aliased) };
+    println!("ptr={:#x} len={} cap={}", header.0, header.1, header.2);
+}
+```
+
+**Key insight:** A single soundness bug in the borrow checker turns a sandboxed Rust playground into an arbitrary-read-write primitive — no `unsafe` required. When a Rust CTF bans `unsafe` and pins a specific compiler version, grep the rust-lang issue tracker for `soundness` bugs fixed after that version: each one is an exploitation candidate. Repro this family with `std::mem::transmute` only after you have a lifetime-extended reference; the alias is the hard part.
+
+**References:** Hack.lu CTF 2018 — Rusty CodePad, writeup 11859
+
+---
+
+### Rust #[no_mangle] libc Override for seccomp Bypass (Hack.lu 2018)
+
+**Pattern:** A sandboxed Rust binary calls `prctl(PR_SET_SECCOMP, ...)` early in `main`, then drops to user code. Because the sandboxed crate is *linked statically* alongside libc, defining an `extern "C"` function named `prctl` with `#[no_mangle]` shadows libc's symbol at link time. Returning `0` from the override disables seccomp, leaving every syscall reachable from the attacker's code.
+
+```rust
+// User-supplied code — linked into the same binary as the sandbox harness
+#[no_mangle]
+pub extern "C" fn prctl(_a: i64, _b: i64) -> i64 {
+    0 // pretend success, do not install any filter
+}
+
+// When main() calls prctl(PR_SET_SECCOMP, ...) it hits our override
+fn main() {
+    // The real program runs without seccomp filtering
+}
+```
+
+**Key insight:** Rust's static-linking default means `extern "C"` + `#[no_mangle]` is effectively a dynamic hook at compile time — any libc symbol the sandbox harness calls (`prctl`, `chroot`, `seteuid`, `read`) can be redefined by attacker crate code that ships inside the same binary. Harden by routing syscalls through `libc::syscall(SYS_prctl, ...)` directly (which bypasses the symbol table) or by using `-Wl,-Bsymbolic` to prefer the intended definitions.
+
+**References:** Hack.lu CTF 2018 — Rusty CodePad seccomp variant, writeup 11864
+
+### Rust xmmword Constant Extraction via IDAPython (Insomnihack 2019)
+
+**Pattern:** Rust stores literal byte buffers (flag expected values, XOR tables) as 16-byte xmmword constants in `.rodata`. IDA parses these as `xmmword_xxxx` tokens. Walk the `.rodata` range in IDAPython, read each xmmword, reverse any simple obfuscation (e.g., `(dword >> 2) ^ 0xA`), and dump the plaintext.
+
+```python
+import idc, idaapi
+start, end = 0x4A1000, 0x4A1100
+for ea in range(start, end, 4):
+    d = idc.get_wide_dword(ea)
+    print(chr((d >> 2) ^ 0xA), end='')
+```
+
+**Key insight:** Rust binaries are hard to decompile but very easy to scan for literal data. Any check of the form `input == const_buf` leaves the expected value in `.rodata` untouched. Grep for `mov reg, xmmword [rip+offset]` to find the slot, then dump.
+
+**References:** Insomnihack teaser 2019 — beginner_reverse, writeup 12910
+
+---
+
+## Nuitka-Compiled Python — Module Stub Injection (X-MAS CTF 2018)
+
+**Pattern:** Nuitka turns Python sources into a monolithic native binary, but still uses the standard Python import machinery at runtime. Put a dummy `base64.py` / `midi.py` / `whatever_module.py` in the current working directory before executing the binary; the module system prefers CWD, so your stub is loaded instead of the embedded one. Log every attribute access and incrementally build a shim of the API the binary uses.
+
+```python
+# base64.py next to the binary
+class _Trace:
+    def __getattr__(self, name):
+        def f(*a, **k):
+            print(f'base64.{name}({a!r}, {k!r})')
+            return b''
+        return f
+import sys; sys.modules[__name__] = _Trace()
+```
+
+Run `./target_bin`; the printed calls reveal the algorithm without decompiling the Nuitka output.
+
+**Key insight:** Any runtime that still resolves module names through `sys.path` (Nuitka, PyInstaller with `--onefile`, Py2Exe with `--bundle_files=1` off, frozen CPython) can be shimmed at import time with CWD stubs. Grep `strings` output for module names to pick good hook targets.
+
+**References:** X-MAS CTF 2018 — A Christmas Carol, writeup 12667

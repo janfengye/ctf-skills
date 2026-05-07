@@ -10,6 +10,7 @@
   - [Tracing and Stalker](#tracing-and-stalker)
   - [r2frida (Radare2 + Frida Integration)](#r2frida-radare2--frida-integration)
   - [Frida for Android/iOS](#frida-for-androidios)
+  - [Frida Memoization for Recursive Function Speedup (hxp CTF 2017)](#frida-memoization-for-recursive-function-speedup-hxp-ctf-2017)
 - [angr (Symbolic Execution)](#angr-symbolic-execution)
   - [angr Installation](#angr-installation)
   - [Basic Path Exploration](#basic-path-exploration)
@@ -26,15 +27,13 @@
   - [Key Features](#key-features)
   - [Scripting](#scripting)
   - [Common CTF Workflow](#common-ctf-workflow)
-- [Qiling Framework (Cross-Platform Emulation)](#qiling-framework-cross-platform-emulation)
-  - [Qiling Installation](#qiling-installation)
-  - [Basic Usage](#basic-usage)
-  - [Anti-Debug Bypass via Emulation](#anti-debug-bypass-via-emulation)
-  - [Input Fuzzing with Qiling](#input-fuzzing-with-qiling)
-- [Triton (Dynamic Symbolic Execution)](#triton-dynamic-symbolic-execution)
-- [Intel Pin Instruction-Counting Side Channel (Hackover CTF 2015)](#intel-pin-instruction-counting-side-channel-hackover-ctf-2015)
-- [Opcode-Only Trace Reconstruction (0CTF 2016)](#opcode-only-trace-reconstruction-0ctf-2016)
-- [LD_PRELOAD time() Freeze for Deterministic Analysis (EKOPARTY 2017)](#ld_preload-time-freeze-for-deterministic-analysis-ekoparty-2017)
+- [GDB Register Side-Channel on putchar() (picoCTF 2018)](#gdb-register-side-channel-on-putchar-picoctf-2018)
+- [radare2 Visual Panels for Custom VM Tracing (OTW Advent 2018)](#radare2-visual-panels-for-custom-vm-tracing-otw-advent-2018)
+- [libSegFault.so Register Dump at Crash (OTW Advent 2018)](#libsegfaultso-register-dump-at-crash-otw-advent-2018)
+- [r2pipe Binary Walking + DP Constraint Solver (OTW Advent 2018)](#r2pipe-binary-walking--dp-constraint-solver-otw-advent-2018)
+- [GDB Commands at strcmp to Recover Dynamic XOR Key (TAMUctf 2019)](#gdb-commands-at-strcmp-to-recover-dynamic-xor-key-tamuctf-2019)
+
+For Qiling/Triton emulation and Intel Pin / LD_PRELOAD side-channel techniques, see [tools-emulation.md](tools-emulation.md).
 
 ---
 
@@ -213,6 +212,57 @@ Java.perform(function() {
 **Key insight:** Frida excels where static analysis fails — obfuscated code, packed binaries, and runtime-generated data. Hook comparison functions (`strcmp`, `memcmp`, custom validators) to extract expected values without reversing the algorithm. Use `Interceptor.attach` for observation, `Interceptor.replace` for modification.
 
 **When to use:** Anti-debugging bypass, extracting runtime-computed keys, hooking crypto functions to dump plaintext, mobile app analysis, packed binary inspection.
+
+### Frida Memoization for Recursive Function Speedup (hxp CTF 2017)
+
+Hook a recursive function with Frida, memoize results, and replay cached values to skip redundant computation. Fibonacci-like recursive challenges with exponential complexity become instant with memoization.
+
+```javascript
+// memo_hook.js — memoize a recursive function to skip redundant calls
+var memo = {};
+var funcAddr = ptr("0x400abc");    // Address of the recursive function
+var retAddr = ptr("0x400def");     // Address of the function's ret instruction
+
+Interceptor.attach(funcAddr, {
+    onEnter: function(args) {
+        this.key = args[0].toInt32();
+        if (memo[this.key] !== undefined) {
+            // Skip computation entirely: set return value and jump to ret
+            this.context.rax = memo[this.key];
+            this.context.rip = retAddr;
+        }
+    },
+    onLeave: function(retval) {
+        // Cache the result for future calls with the same argument
+        memo[this.key] = retval.toInt32();
+    }
+});
+```
+
+```bash
+# Usage
+frida -f ./binary -l memo_hook.js --no-pause
+```
+
+For multi-argument functions, build a composite key:
+```javascript
+Interceptor.attach(funcAddr, {
+    onEnter: function(args) {
+        this.key = args[0].toInt32() + "," + args[1].toInt32();
+        if (memo[this.key] !== undefined) {
+            this.context.rax = memo[this.key];
+            this.context.rip = retAddr;
+        }
+    },
+    onLeave: function(retval) {
+        memo[this.key] = retval.toInt32();
+    }
+});
+```
+
+**Key insight:** Frida's `Interceptor` can both read and modify register state, allowing you to skip function execution entirely by setting `rax` (return value) and `rip` (to the `ret` instruction). This works on any recursive function where the same arguments produce the same result. Exponential-time recursive computations (Fibonacci, Ackermann, tree traversals) become linear with memoization.
+
+**References:** hxp CTF 2017
 
 ---
 
@@ -492,195 +542,138 @@ StepOver                       # Step over
 
 ---
 
-## Qiling Framework (Cross-Platform Emulation)
+## GDB Register Side-Channel on putchar() (picoCTF 2018)
 
-Qiling emulates binaries with OS-level support (syscalls, filesystem, registry). Built on Unicorn but adds the OS layer that Unicorn lacks.
+**Pattern:** The binary decrypts a flag one character at a time and calls `putchar()` with a `usleep()` between prints. Rather than wait out the sleeps, set a breakpoint on `putchar@plt` and log `$rdi` (on glibc x86-64 the character lives there) at every hit. A GDB logging loop dumps the full flag in milliseconds regardless of the artificial delay.
 
-### Qiling Installation
+```gdb
+# ~/.gdbinit for this challenge
+set pagination off
+set logging file flag.log
+set logging overwrite on
+set logging on
 
-```bash
-pip install qiling
-# Download rootfs for target OS:
-git clone https://github.com/qilingframework/rootfs
-```
+break putchar
+commands
+  silent
+  printf "%c", $rdi
+  continue
+end
 
-### Basic Usage
-
-```python
-from qiling import Qiling
-from qiling.const import QL_VERBOSE
-
-# Linux ELF emulation
-ql = Qiling(["./binary", "arg1"], "rootfs/x8664_linux",
-            verbose=QL_VERBOSE.DEFAULT)
-ql.run()
-
-# Windows PE emulation (no Windows needed!)
-ql = Qiling(["rootfs/x86_windows/bin/binary.exe"], "rootfs/x86_windows")
-ql.run()
-
-# ARM/MIPS emulation (IoT firmware)
-ql = Qiling(["rootfs/arm_linux/bin/binary"], "rootfs/arm_linux")
-ql.run()
-```
-
-### Anti-Debug Bypass via Emulation
-
-```python
-from qiling import Qiling
-
-ql = Qiling(["./binary"], "rootfs/x8664_linux")
-
-# Hook ptrace syscall — return 0 (success)
-def hook_ptrace(ql, ptrace_request, pid, addr, data):
-    ql.log.info("ptrace bypassed")
-    return 0
-
-ql.os.set_syscall("ptrace", hook_ptrace)
-
-# Hook specific address (e.g., anti-VM check)
-def skip_check(ql):
-    ql.arch.regs.rax = 0  # Force success
-    ql.log.info(f"Skipped check at {ql.arch.regs.rip:#x}")
-
-ql.hook_address(skip_check, 0x401234)
-
-ql.run()
-```
-
-### Input Fuzzing with Qiling
-
-```python
-# Emulate binary with different inputs to find flag
-import string
-from qiling import Qiling
-
-def test_input(candidate):
-    ql = Qiling(["./binary"], "rootfs/x8664_linux",
-                verbose=QL_VERBOSE.DISABLED, stdin=candidate.encode())
-    ql.run()
-    return ql.os.stdout.read()
-
-for ch in string.printable:
-    output = test_input("flag{" + ch)
-    if b"Correct" in output:
-        print(f"Found: {ch}")
-```
-
-**Advantages over GDB/Frida:**
-- No debugger artifacts (bypasses all anti-debug by default)
-- Cross-platform without hardware (ARM, MIPS, RISC-V on x86 host)
-- Scriptable with Python (faster iteration than GDB)
-- Snapshot/restore for brute-forcing
-
-**Key insight:** Qiling emulates the entire OS layer (syscalls, filesystem, registry), not just the CPU. This means anti-debug checks like `ptrace(TRACEME)` naturally return success without patching, and you can analyze ARM/MIPS binaries on an x86 host without QEMU or real hardware.
-
-**When to use:** Foreign architecture binaries, IoT firmware, heavy anti-debug, automated testing of many inputs.
-
----
-
-## Triton (Dynamic Symbolic Execution)
-
-See [tools-advanced.md](tools-advanced.md#triton-dynamic-symbolic-execution) for full Triton reference. Quick usage:
-
-```python
-from triton import *
-
-ctx = TritonContext(ARCH.X86_64)
-
-# Symbolize input buffer
-for i in range(32):
-    ctx.symbolizeMemory(MemoryAccess(0x600000 + i, CPUSIZE.BYTE), f"flag_{i}")
-
-# Process instructions and collect constraints
-# At comparison point, solve for flag
-model = ctx.getModel(ctx.getPathConstraintsAst())
-flag = ''.join(chr(v.getValue()) for _, v in sorted(model.items()))
-```
-
-**Key insight:** Triton excels at single-path DSE (Dynamic Symbolic Execution) where angr's path explosion is a problem. Feed it a concrete execution trace, symbolize specific inputs, and solve for constraints at comparison points. Faster than angr for linear code paths with known execution flow.
-
-**Best for:** Single-path symbolic execution, deobfuscation, taint analysis. Faster than angr for linear code paths.
-
----
-
-## Intel Pin Instruction-Counting Side Channel (Hackover CTF 2015)
-
-**Pattern:** Brute-force input character-by-character against a binary using Intel Pin's `inscount0` tool. Each correct character causes deeper execution (more instructions) in the comparison logic.
-
-```python
-import string
-from subprocess import Popen, PIPE
-
-pin = './pin'
-tool = './source/tools/ManualExamples/obj-ia32/inscount0.so'
-binary = './target'
-
-key = ''
-while True:
-    best_count, best_char = 0, ''
-    for c in string.printable:
-        cmd = [pin, '-injection', 'child', '-t', tool, '--', binary]
-        p = Popen(cmd, stdout=PIPE, stdin=PIPE, stderr=PIPE)
-        p.communicate((key + c + '\n').encode())
-        with open('inscount.out') as f:
-            count = int(f.read().split()[-1])
-        if count > best_count:
-            best_count, best_char = count, c
-    key += best_char
-    print(f"Found: {key}")
-```
-
-**Key insight:** Movfuscated binaries (compiled with `movfuscator`) expand every instruction into sequences of `mov` operations, making static analysis impractical. However, character-by-character comparison still creates measurable instruction count differences. Pin's `inscount0.so` counts total executed instructions — the correct character at each position causes ~1000+ more instructions (proceeding further in the comparison). Also works for obfuscated binaries with sequential input checks.
-
----
-
-## Opcode-Only Trace Reconstruction (0CTF 2016)
-
-Given an execution trace with only opcodes (no register/memory values), reconstruct the program: sort/dedup trace by address, split into basic blocks, annotate functions. Sorting algorithms are particularly vulnerable -- branch decisions leak element ordering.
-
-**Approach:**
-1. Sort trace entries by address, deduplicate to recover code layout
-2. Identify basic block boundaries (jumps, calls, returns)
-3. Map branch taken/not-taken decisions from trace order
-4. For sorting algorithms, partition comparisons reveal relative ordering of all input elements
-
-**Key insight:** Execution traces without data values still leak information through branch decisions. Quicksort partition comparisons reveal which element is greater/lesser at each step, enabling full recovery of the sorted input from branch direction alone.
-
----
-
-## LD_PRELOAD time() Freeze for Deterministic Analysis (EKOPARTY 2017)
-
-Override `time()` via LD_PRELOAD to return a constant value, freezing any timestamp-seeded PRNG. Once the binary's cipher becomes deterministic, brute-force each output byte without understanding the VM or cipher internals.
-
-```c
-// freeze_time.c — compile: gcc -shared -fPIC -o freeze.so freeze_time.c
-#include <time.h>
-
-time_t time(time_t *t) {
-    if (t) *t = 1234567890;
-    return 1234567890;
-}
+run
 ```
 
 ```bash
-# Build and use:
-gcc -shared -fPIC -o freeze.so freeze_time.c
-LD_PRELOAD=./freeze.so ./binary
-
-# Byte-at-a-time oracle: run with frozen time, try each candidate byte,
-# observe output — correct byte produces expected output character.
-for byte in $(seq 0 255); do
-    output=$(echo -n "$(printf '\x%02x' $byte)" | LD_PRELOAD=./freeze.so ./binary)
-    # Check output against known/expected
-done
+gdb -batch -x script.gdb ./crackme
+cat flag.log
 ```
 
-If `srand()` or `rand()` is also involved, override `rand()` too:
-```c
-int rand(void) { return 42; }
+**Key insight:** Any time a program artificially slows output with `usleep`, `nanosleep`, or busy-loop delays, the character to be printed is already in a register before the sleep runs. Breakpoint on the output function (`putchar`, `fputc`, `write` with `fd=1`), print the first-argument register (`$rdi` on x86-64, `$r0` on ARM, `$a0` on RISC-V/MIPS), and let GDB scripting batch-extract the data. Works even on anti-debug binaries when hardware breakpoints are available.
+
+**References:** picoCTF 2018 — learn gdb, writeup 11784
+
+---
+
+## radare2 Visual Panels for Custom VM Tracing (OTW Advent 2018)
+
+**Pattern:** Custom-VM binaries look opaque until you can see the program counter, next opcode, stack, and heap simultaneously. radare2's panel mode (`V!`) lets you pin all four views on one screen and step through host-level instructions while watching the VM state move.
+
+```text
+f sp @ rbp-0x160       # flag VM sp
+f ip @ rbp-0x158       # flag VM ip
+f stack @ rbp-0x150
+f heap @ rbp-0x148
+
+V!                       # enter panels
+# panel 1: ?v [ip]; pd 1 @ [ip]    (next VM instruction)
+# panel 2: pxQ 0x60 @ sp             (stack)
+# panel 3: pxQ 0x60 @ heap           (heap)
+# panel 4: afvd                      (local vars / registers)
 ```
 
-**Key insight:** LD_PRELOAD function interception freezes non-determinism sources (time, rand). Once deterministic, even complex VMs become tractable byte-at-a-time oracles.
+Set conditional breakpoints on host-level branches that correspond to VM opcode dispatch, and step with `ds`. Combine with `e io.cache=true` for non-destructive patching of VM opcodes during analysis.
 
-**References:** EKOPARTY CTF 2017
+**Key insight:** Custom VMs are reversible in minutes once you watch their state live. Panel mode beats static decompilation because the host binary often lacks decompiler-friendly structure; the VM becomes self-explanatory when you see every register tick in real time.
+
+**References:** OverTheWire Advent 2018 — Jackinthebox, writeup 12789
+
+---
+
+## libSegFault.so Register Dump at Crash (OTW Advent 2018)
+
+**Pattern:** You need the exact register state at shellcode entry but gdb is unavailable or hooked. Preload `libSegFault.so` (shipped with glibc) and crash the program: it prints a full register dump, backtrace, and memory map to stderr.
+
+```bash
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libSegFault.so ./target
+# or 32-bit:
+LD_PRELOAD=/lib32/libSegFault.so ./target
+
+# Force the crash:
+# segfault_handler dumps: RIP, RSP, RAX..R15, stack backtrace
+```
+
+Read the printed registers to discover which already point at your shellcode (common: `RAX` → buffer, `RDI` → zero) and design minimal shellcode.
+
+**Key insight:** libSegFault is installed on every glibc system as part of standard debugging infrastructure. It turns any segfault into a free register snapshot, even on hardened boxes without `strace`/`gdb` permissions.
+
+**References:** OverTheWire Advent Bonanza 2018 — Day 22, writeup 12757
+
+---
+
+## r2pipe Binary Walking + DP Constraint Solver (OTW Advent 2018)
+
+**Pattern:** 12 MB binary with 300k+ basic blocks performs chained hash checks on `argv[1]`. Walk every block via `r2pipe`, classify each instruction as hash/cmp/jmp/print, build a constraint graph, then solve with dynamic programming + backtracking over input positions.
+
+```python
+import r2pipe
+r = r2pipe.open('./huge_binary')
+r.cmd('aaa')
+for fn in r.cmdj('aflj'):
+    for block in r.cmdj(f"pdfj @ {fn['offset']}")['ops']:
+        op = block['type']
+        if op == 'cmp':  constraints.append(parse_cmp(block))
+        if op == 'call': targets.append(block['jump'])
+# DP: memoize (position, accepted_set) -> char
+```
+
+**Key insight:** Big binaries with hash chains are solvable if you treat each branch as an inequality on input bytes. r2pipe's JSON output is machine-readable; DP over position/value tuples prunes most branches before running.
+
+**References:** OverTheWire Advent Bonanza 2018 — Day 8, writeup 12771
+
+---
+
+## GDB Commands at strcmp to Recover Dynamic XOR Key (TAMUctf 2019)
+
+**Pattern (Obfuscaxor):** Binary uses the [obfy](https://github.com/fritzone/obfy) C++ template obfuscator to bury a simple `enc(input)` XOR loop under thousands of opaque predicates. The terminal check is still `strcmp(expected_ciphertext, enc(input))` — so instead of unwinding obfy, break at the `strcmp` call and dump both operands:
+
+```
+disassemble verify_key
+# ... 0x5555555560b9 <+96>: call   strcmp@plt
+break *verify_key+96
+commands
+  silent
+  printf "RDI (expected): "
+  x/4xg $rdi
+  printf "RSI (computed): "
+  x/4xg $rsi
+  continue
+end
+run
+```
+
+Feed a known plaintext (`AAAAAAAAA`) and record `computed_A[i]`. Because `enc` is a byte-wise XOR keystream, the key byte is recovered directly from the delta with the target:
+
+```python
+# input_char ^ key = computed_char, and we want: target_char ^ key = target_input
+def to_ans(got_A, expected):
+    return chr(got_A ^ ord('A') ^ expected)
+
+# Sanity: flip just one byte of input and confirm only one computed byte moves.
+```
+
+Chain the per-byte recovery over the full 16-byte target and reconstruct the correct key (`p3Asujmn9CEeCB3A` for this challenge).
+
+**Key insight:** When `strcmp` is the last gate, the obfuscator is irrelevant — its output still has to equal a fixed string at a known call site. GDB's `commands` block turns the breakpoint into an automatic oracle: one run with `AAAA...` leaks the keystream, and a second pass with any target string gives the valid input. Works for any keyed transform that is effectively a permutation of the input under a fixed key.
+
+**References:** TAMUctf 2019 — Obfuscaxor, writeup 13574
+

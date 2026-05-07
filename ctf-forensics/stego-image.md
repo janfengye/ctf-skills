@@ -17,6 +17,12 @@ Techniques specific to hiding data in image formats (JPEG, PNG, BMP, GIF). For n
 - [RGB Parity Steganography (Break In 2016)](#rgb-parity-steganography-break-in-2016)
 - [Pixel Coordinate Chain Steganography (H4ckIT CTF 2016)](#pixel-coordinate-chain-steganography-h4ckit-ctf-2016)
 - [AVI Frame Differential Pixel Steganography (H4ckIT CTF 2016)](#avi-frame-differential-pixel-steganography-h4ckit-ctf-2016)
+- [JPEG Single-Bit-Flip Brute Force with OCR (SECCON 2017)](#jpeg-single-bit-flip-brute-force-with-ocr-seccon-2017)
+- [GIF Frame PLTE Chunk Concatenation to ELF (IceCTF 2018)](#gif-frame-plte-chunk-concatenation-to-elf-icectf-2018)
+- [Nested-Resize QR Overlay at Survivor Pixels (SECCON 2018)](#nested-resize-qr-overlay-at-survivor-pixels-seccon-2018)
+- [ImageMagick +append Puzzle Stitching + gaps Solver (X-MAS CTF 2018)](#imagemagick-append-puzzle-stitching--gaps-solver-x-mas-ctf-2018)
+- [Steghide Passphrase in JPEG Header Metadata (Saudi/Oman CTF 2019)](#steghide-passphrase-in-jpeg-header-metadata-saudioman-ctf-2019)
+- [Corrupted PNG Magic and Lowercase Chunk Repair (Pragyan CTF 2019)](#corrupted-png-magic-and-lowercase-chunk-repair-pragyan-ctf-2019)
 
 ---
 
@@ -535,3 +541,151 @@ def extract_frame_differential(frame_dir, num_frames):
 ```
 
 **Key insight:** Frame differential steganography hides data in the temporal domain rather than spatial. Standard image stego tools analyze single frames and miss inter-frame changes. Extract all frames, then diff consecutive pairs looking for single-pixel-value increments.
+
+---
+
+### JPEG Single-Bit-Flip Brute Force with OCR (SECCON 2017)
+
+Corrupted JPEG with a single bitflip. Generate all single-bit variants and scan with OCR:
+
+```python
+data = open('corrupted.jpg', 'rb').read()
+for byte_pos in range(len(data)):
+    for bit in range(8):
+        candidate = data[:byte_pos] + bytes([data[byte_pos] ^ (1 << bit)]) + data[byte_pos+1:]
+        with open(f'attempt_{byte_pos}_{bit}.jpg', 'wb') as f:
+            f.write(candidate)
+```
+
+```bash
+# Automated OCR scan for flag
+for f in attempt_*.jpg; do
+    result=$(tesseract "$f" stdout 2>/dev/null)
+    if echo "$result" | grep -qi "flag\|ctf\|SECCON"; then
+        echo "FOUND in $f: $result"
+    fi
+done
+```
+
+**Key insight:** For small files (< 10KB), the total search space for single-bit flips is `8 * file_size` — typically under 80,000 candidates, easily brute-forceable. Use thumbnail generation as a fast validity check (corrupt JPEGs fail to decode), then OCR on survivors. JPEG compressed data rule: `0xFF` is always followed by `0x00` (stuffed byte) or a marker — violations indicate the corruption location.
+
+---
+
+## GIF Frame PLTE Chunk Concatenation to ELF (IceCTF 2018)
+
+**Pattern:** A GIF hides a Linux ELF binary by breaking it into indexed PNG frames. Each frame's `PLTE` (palette) chunk holds the next slice of the binary — the actual pixel data is irrelevant. Extract with Pillow: iterate frames, convert each to PNG, walk the PNG chunks, concatenate every `PLTE` body, and the result is a valid ELF file.
+
+```python
+from PIL import Image, ImagePalette
+import struct
+
+def read_png_plte(png_bytes):
+    i = 8  # skip PNG magic
+    while i < len(png_bytes):
+        length = struct.unpack(">I", png_bytes[i:i+4])[0]
+        ctype  = png_bytes[i+4:i+8]
+        body   = png_bytes[i+8:i+8+length]
+        if ctype == b"PLTE":
+            return body
+        i += 12 + length
+    return b""
+
+payload = bytearray()
+with Image.open("carrier.gif") as gif:
+    for frame in range(gif.n_frames):
+        gif.seek(frame)
+        png_buf = io.BytesIO()
+        gif.save(png_buf, "PNG")
+        payload += read_png_plte(png_buf.getvalue())
+
+open("recovered.elf", "wb").write(payload)
+```
+
+**Key insight:** GIF frames are internally stored with their own palettes. When you re-encode each frame as a PNG, the palette survives as a `PLTE` chunk — an ignored but byte-accurate container. Any stego carrier that uses a multi-frame format with per-frame metadata (GIF palettes, APNG frame data, PDF page streams, MKV tracks) lets you embed data in the *metadata channel* instead of the pixel channel, bypassing most LSB-style detection. When a GIF looks like a harmless animation but contains extra frames or palette entries, dump chunk-by-chunk before touching the pixels.
+
+**References:** IceCTF 2018 — ilovebees, writeup 11418
+
+---
+
+## Nested-Resize QR Overlay at Survivor Pixels (SECCON 2018)
+
+**Pattern:** Challenge PNG decodes to two different QR codes depending on how many times it is scaled down with nearest-neighbor interpolation (500 → 250 → 100 → 50). Track which source pixels survive every reduction: for a 10× chain with `PIL.Image.resize(size, Image.NEAREST)`, survivors sit at indices `(10i+7, 10j+7)`. Overlay a second QR at exactly those positions so it only emerges after the chained resize.
+
+```python
+from PIL import Image
+big = Image.open('qr1.png')              # 500x500 visible QR
+small = Image.open('qr2.png')            # 50x50 hidden QR
+px = big.load()
+sx = small.load()
+for i in range(50):
+    for j in range(50):
+        px[10*i+7, 10*j+7] = sx[i, j]
+big.save('trap.png')
+```
+
+**Key insight:** Nearest-neighbor resize keeps exactly one pixel per source block; its offset depends on rounding (PIL picks `floor(original*scale)+0.5`). Compute the survivor index once per resize step, then compose the nested stego at those indices. Works for any number of cascaded resizes as long as the interpolation is nearest-neighbor.
+
+**References:** SECCON 2018 — QRChecker, writeup 12014
+
+---
+
+## ImageMagick +append Puzzle Stitching + gaps Solver (X-MAS CTF 2018)
+
+**Pattern:** Disk image contains N puzzle-piece PNGs carved out by `foremost` or `scalpel`. Stitch all pieces horizontally with ImageMagick `convert +append`, then feed the strip to the `gaps` jigsaw solver (https://github.com/nemanja-m/gaps) with the known piece size (often stored in EXIF) to auto-reassemble.
+
+```bash
+foremost -t png -i disk.img -o pieces
+convert +append pieces/*.png strip.png
+gaps --image=strip.png --size=273
+```
+
+**Key insight:** CTF jigsaw challenges rarely require manual work. Carve pieces, stitch, run `gaps` — it uses a genetic algorithm to reassemble in minutes. Read `exiftool` on each piece for the size hint.
+
+**References:** X-MAS CTF 2018 — Message from Santa, writeup 12662
+
+---
+
+## Steghide Passphrase in JPEG Header Metadata (Saudi/Oman CTF 2019)
+
+**Pattern:** JPEG file with `steghide`-embedded payload whose passphrase is hidden in plain ASCII inside the JPEG header/metadata region. Standard tools (`exiftool`, `strings`) may miss it if the byte range isn't flagged as a proper EXIF/comment tag, but `xxd` on the first few hundred bytes reveals the string.
+
+```bash
+# Scan header for suspicious ASCII
+xxd info.jpg | head -20
+# 00000010: ffdb 0043 0008 6261 6469 7362 6164 0008  ...C..badisbad..
+#                      ^^^^^^^^^^^^^^^^^ passphrase at offset 0x18
+
+# Confirm steghide payload with the passphrase
+steghide --info info.jpg       # prompts for passphrase
+steghide extract -sf info.jpg -p badisbad
+```
+
+**Key insight:** Always scan the first ~256 bytes of a JPEG with `xxd`/`hexdump -C` for ASCII runs — authors sometimes stuff passphrases into reserved areas of JFIF/APPn segments where `exiftool` doesn't surface them, but they're trivially visible in a hex view. Pair the leak with `steghide`, `outguess`, or `stegseek` wordlist seeding.
+
+**References:** Quals Saudi and Oman National Cyber Security CTF 2019 — Hack a nice day, writeup 13232
+
+---
+
+## Corrupted PNG Magic and Lowercase Chunk Repair (Pragyan CTF 2019)
+
+**Pattern:** PNG is unreadable because the 8-byte magic is tampered (e.g. `89 50 4E 47 2E 0A 2E 0A` instead of the correct `89 50 4E 47 0D 0A 1A 0A`) and critical chunk names are lowercased (`idat` instead of `IDAT`). PNG decoders treat lowercase chunk names as "ancillary" and skip them, so the image looks empty until the case is fixed. Metadata (e.g. `exiftool` Artist field) then yields the next step.
+
+```bash
+# Step 1: patch magic bytes
+printf '\x89PNG\r\n\x1a\n' | dd of=broken.png conv=notrunc bs=1 count=8
+
+# Step 2: re-capitalise critical chunk names (IHDR, IDAT, IEND, PLTE)
+python3 -c "
+d = open('broken.png','rb').read()
+d = d.replace(b'idat', b'IDAT').replace(b'iend', b'IEND')
+open('fixed.png','wb').write(d)
+"
+
+# Step 3: pull hidden metadata
+exiftool fixed.png | grep -Ei 'artist|comment|desc'
+# Artist : md5_MEf89jf4h9   -> use md5(...) as zip password
+```
+
+**Key insight:** PNG has two orthogonal parseability gates: the 8-byte signature and the case of each chunk name (first letter uppercase = critical). Fix both before concluding the file is empty. `pngcheck -v` flags exactly which byte/chunk is wrong. Once readable, treat EXIF `Artist`, `Description`, and `tEXt`/`iTXt` chunks as prime hiding spots.
+
+**References:** Pragyan CTF 2019 — Magic PNGs, writeup 13833

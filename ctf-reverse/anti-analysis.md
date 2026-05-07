@@ -9,8 +9,10 @@ Comprehensive reference for anti-debugging, anti-VM, anti-DBI, and integrity-che
   - [Timing-Based Detection](#timing-based-detection)
   - [Signal-Based Anti-Debug](#signal-based-anti-debug)
   - [Syscall-Level Evasion](#syscall-level-evasion)
+  - [Trap-Flag Self-Check with cmovz Patcher (Hack.lu 2018)](#trap-flag-self-check-with-cmovz-patcher-hacklu-2018)
+  - [SIGFPE Handler for mprotect Code Mutation (Hack.lu 2018)](#sigfpe-handler-for-mprotect-code-mutation-hacklu-2018)
 - [Windows Anti-Debug (Advanced)](#windows-anti-debug-advanced)
-  - [PEB-Based Checks](#peb-based-checks)
+  - [PEB (Process Environment Block) Checks](#peb-process-environment-block-checks)
   - [NtQueryInformationProcess](#ntqueryinformationprocess)
   - [Heap Flags](#heap-flags)
   - [TLS Callbacks](#tls-callbacks)
@@ -35,10 +37,9 @@ Comprehensive reference for anti-debugging, anti-VM, anti-DBI, and integrity-che
   - [Function Chunking / Scattered Code](#function-chunking--scattered-code)
   - [Control Flow Flattening (Advanced)](#control-flow-flattening-advanced)
   - [Mixed Boolean-Arithmetic (MBA) Identification & Simplification](#mixed-boolean-arithmetic-mba-identification--simplification)
-- [SIGILL Handler for Execution Mode Switching (Hack.lu 2015)](#sigill-handler-for-execution-mode-switching-hacklu-2015)
-- [SIGFPE Signal Handler Side-Channel via strace Counting (PlaidCTF 2017)](#sigfpe-signal-handler-side-channel-via-strace-counting-plaidctf-2017)
-- [Instruction Trace Inversion with Keystone and Unicorn (MeePwn CTF 2017)](#instruction-trace-inversion-with-keystone-and-unicorn-meepwn-ctf-2017)
 - [Comprehensive Bypass Strategies](#comprehensive-bypass-strategies)
+
+For CTF writeup techniques (SIGILL handler, SIGFPE strace side-channel, instruction trace inversion, call-less function chaining, parent-patched child binary dump), see [anti-analysis-ctf.md](anti-analysis-ctf.md).
   - [Universal Bypass Checklist](#universal-bypass-checklist)
   - [Layered Anti-Debug (Real-World Pattern)](#layered-anti-debug-real-world-pattern)
   - [Quick Reference: Check to Bypass](#quick-reference-check-to-bypass)
@@ -201,7 +202,7 @@ asm volatile("syscall" : "=a"(ret) : "a"(101), "D"(0), "S"(0), "d"(0), "r"(0));
 
 ## Windows Anti-Debug (Advanced)
 
-### PEB-Based Checks
+### PEB (Process Environment Block) Checks
 
 ```c
 // BeingDebugged flag (offset 0x2 in PEB)
@@ -587,106 +588,7 @@ expr = "(a | b) + (a & b) - (~a & b)"
 print(simplify_mba(expr))  # → a
 ```
 
----
-
-## SIGILL Handler for Execution Mode Switching (Hack.lu 2015)
-
-Binaries may install SIGILL (illegal instruction) handlers to switch between x86 and x86-64 execution modes or implement custom opcode dispatch:
-
-1. **Signal registration:** `signal(SIGILL, handler)` installs a callback for illegal instruction exceptions
-2. **Mode switching:** The handler modifies the saved instruction pointer or segment registers to switch between 32-bit and 64-bit code
-3. **Custom opcodes:** Invalid x86 instructions trigger the handler, which interprets operand bytes as custom VM opcodes
-
-```c
-// Signal handler decodes "illegal" instructions as custom opcodes
-void sigill_handler(int sig, siginfo_t *info, void *ucontext) {
-    ucontext_t *ctx = (ucontext_t *)ucontext;
-    unsigned char *pc = (unsigned char *)ctx->uc_mcontext.gregs[REG_RIP];
-    // Decode custom opcode from bytes at PC
-    // Advance PC past the custom instruction
-    ctx->uc_mcontext.gregs[REG_RIP] += opcode_length;
-}
-```
-
-**Key insight:** If a binary installs signal handlers for SIGILL/SIGSEGV/SIGTRAP early in execution, suspect custom instruction dispatch. Trace signal deliveries with `strace -e signal` or set GDB to not intercept: `handle SIGILL nostop pass`.
-
----
-
-## SIGFPE Signal Handler Side-Channel via strace Counting (PlaidCTF 2017)
-
-Binary uses SIGFPE signal handlers for control flow, making static analysis unreliable. Brute-force by counting SIGFPE signals via strace — correct input characters produce more signals.
-
-```bash
-# Count SIGFPE signals per input character guess
-for c in {a..z} {A..Z} {0..9}; do
-    count=$(echo -n "${c}AAAAAAA" | strace -e signal=SIGFPE ./binary 2>&1 | grep -c SIGFPE)
-    echo "$c: $count"
-done
-# Character producing the most SIGFPEs is correct
-# Repeat for each position, extending the known prefix
-```
-
-**Key insight:** Signal handlers (SIGFPE, SIGSEGV, SIGILL) create implicit control flow invisible to static analysis. The number of signals raised correlates with validation progress. Counting signals via `strace -e signal=SIGFPE` turns opaque signal-based validation into a measurable side-channel for character-by-character brute-force.
-
----
-
-## Instruction Trace Inversion with Keystone and Unicorn (MeePwn CTF 2017)
-
-UPX-packed binary applies a sequence of arithmetic-only transforms (sub, add, xor, rol, ror) to the flag. No memory side-effects — purely register arithmetic. IDAPython traces non-jump instructions, the sequence is then inverted to recover the flag.
-
-**Inversion rules:**
-- Reverse the instruction sequence (last instruction first)
-- Swap inverse pairs: `add ↔ sub`, `rol ↔ ror`, `xor` is self-inverse
-
-```python
-# IDAPython: collect non-jump instructions in the obfuscated routine
-import idaapi, idc
-
-def trace_transforms(start_ea, end_ea):
-    instructions = []
-    ea = start_ea
-    while ea < end_ea:
-        mnem = idc.print_insn_mnem(ea)
-        if mnem not in ('jmp', 'je', 'jne', 'call', 'ret'):
-            instructions.append((ea, mnem, idc.print_operands(ea)))
-        ea = idc.next_head(ea)
-    return instructions
-
-transforms = trace_transforms(0x401000, 0x401200)
-
-# Invert: reverse order, swap add/sub and rol/ror
-inverse_map = {'add': 'sub', 'sub': 'add', 'rol': 'ror', 'ror': 'rol', 'xor': 'xor'}
-inverted = [(mnem, op) for (_, mnem, op) in reversed(transforms)]
-inverted = [(inverse_map.get(m, m), op) for m, op in inverted]
-```
-
-```python
-# Assemble inverted instructions with Keystone, emulate with Unicorn
-from keystone import *
-from unicorn import *
-from unicorn.x86_const import *
-
-ks = Ks(KS_ARCH_X86, KS_MODE_64)
-uc = Uc(UC_ARCH_X86, UC_MODE_64)
-
-asm_src = '\n'.join(f'{mnem} {op}' for mnem, op in inverted)
-encoding, _ = ks.asm(asm_src)
-
-CODE_BASE = 0x400000
-uc.mem_map(CODE_BASE, 0x10000)
-uc.mem_write(CODE_BASE, bytes(encoding))
-
-# Set initial register state to the observed output value
-uc.reg_write(UC_X86_REG_RAX, known_output)
-uc.emu_start(CODE_BASE, CODE_BASE + len(encoding))
-flag_bytes = uc.reg_read(UC_X86_REG_RAX).to_bytes(8, 'little')
-```
-
-**PEB anti-debug note:** If the binary reads `PEB.BeingDebugged` and uses it to select between two comparison target values, the traced instructions under IDAPython may use the debug-mode target. Patch `BeingDebugged` to 0 before tracing, or identify both branches and use the non-debug target value.
-
-**Key insight:** Arithmetic-only obfuscation (no memory writes) is fully reversible by tracing, inverting the instruction sequence, and swapping inverse operations. PEB anti-debug can silently change comparison targets — always verify which branch is taken.
-
-**References:** MeePwn CTF 2017
+See [anti-analysis-ctf.md](anti-analysis-ctf.md) for CTF writeup techniques: SIGILL handler for mode switching (Hack.lu 2015), SIGFPE strace side-channel (PlaidCTF 2017), instruction trace inversion (MeePwn 2017), call-less function chaining (THC 2018), and parent-patched child binary dump via `process_vm_writev` (Google CTF Quals 2018).
 
 ---
 
@@ -732,3 +634,60 @@ Many CTF challenges stack multiple checks:
 | Frida detection | Both | Early-load gadget, hook strstr |
 | CPUID hypervisor | Both | Patch CPUID result, bare metal |
 | Thread hiding | Windows | Hook NtSetInformationThread |
+
+---
+
+### Trap-Flag Self-Check with cmovz Patcher (Hack.lu 2018)
+
+**Pattern:** The binary checks `EFLAGS` by doing `pushf; pop edx; and edx, 0x100` (isolating the single-step Trap Flag) and using the result inside a `cmovz` so the correct instruction is overwritten only when the TF bit is clear. Single-stepping in gdb leaves TF set, the `cmovz` never fires, and the program silently runs the wrong code path without crashing.
+
+```asm
+check_debugger:
+    pushf
+    pop   edx
+    and   edx, 0x100          ; Trap Flag only
+    test  edx, edx
+    cmovz eax, ebx            ; overwrite `eax` only when NOT single-stepping
+    mov   [rip+target], eax
+```
+
+**Bypass with hardware breakpoints:**
+```gdb
+(gdb) hbreak *0x56557267       # hardware BP, no INT3, no TF side effect
+(gdb) run
+(gdb) # inspect EAX at the hbreak — the patched value is now written
+```
+
+**Key insight:** `pushf; pop reg; and reg, 0x100` is the cleanest way to check TF without triggering a trap. Single-stepping changes the visible EFLAGS and can also perturb the instruction pipeline, so software breakpoints plus `stepi` both poison the check. Hardware breakpoints (`hbreak`) run the instruction normally and halt afterwards, so the check fires in "not debugging" mode. Apply the same fix to any anti-debug that reads EFLAGS, RFLAGS, or DR6.
+
+**References:** Hack.lu CTF 2018 — Forgetful Commander, writeup 11858
+
+---
+
+### SIGFPE Handler for mprotect Code Mutation (Hack.lu 2018)
+
+**Pattern:** The binary installs a custom `SIGFPE` handler with `sys_sigaction` and arranges for an arithmetic instruction to trap (e.g., `div` by zero). The handler runs with kernel-delivered context, calls `mprotect` on the `.text` page to make it writable, and mutates code that would otherwise stay constant. Standard static analysis misses the mutation because the FPE never fires in the normal path, and standard dynamic analysis misses it because most debuggers intercept SIGFPE before delivery.
+
+```c
+// Handler installed at startup
+void on_fpe(int sig, siginfo_t *info, void *uap) {
+    ucontext_t *ctx = uap;
+    void *page = (void *)((uintptr_t)ctx->uc_mcontext.gregs[REG_RIP] & ~0xfff);
+    mprotect(page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+    // Patch a constant used by the next check
+    *((uint32_t *)(page + 0x42)) = 0xDEADBEEF;
+}
+```
+
+**Bypass:**
+```bash
+# Let SIGFPE reach the program, not the debugger
+gdb ./challenge
+(gdb) handle SIGFPE nostop noprint pass
+(gdb) break *on_fpe
+(gdb) run
+```
+
+**Key insight:** Signal handlers that `mprotect` + mutate code are cross-delimited in a way decompilers cannot model. `SIGFPE` is particularly effective because it is rarely raised during normal execution, so the mutation stays dormant until the attacker hits the crafted input. When you see `sys_sigaction(SIGFPE,...)` or `signal(SIGFPE,...)` in a binary that also calls `mprotect`, trace the handler with `strace -e signal=SIGFPE` and annotate the mutated region by diffing the `.text` pages before and after the first FPE.
+
+**References:** Hack.lu CTF 2018 — Cheat Console, writeup 11868

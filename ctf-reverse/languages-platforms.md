@@ -6,6 +6,7 @@
 - [Rust serde_json Schema Recovery](#rust-serde_json-schema-recovery)
 - [Android JNI RegisterNatives Obfuscation (HTB WonderSMS)](#android-jni-registernatives-obfuscation-htb-wondersms)
 - [Android DEX Runtime Bytecode Patching via /proc/self/maps (Google CTF 2017)](#android-dex-runtime-bytecode-patching-via-procselfmaps-google-ctf-2017)
+- [Android Native .so Loading Bypass in New Project (Codegate CTF 2018)](#android-native-so-loading-bypass-in-new-project-codegate-ctf-2018)
 - [Frida Firebase Cloud Functions Bypass (BSidesSF 2026)](#frida-firebase-cloud-functions-bypass-bsidessf-2026)
 - [Verilog/Hardware Reverse Engineering (srdnlenCTF 2026)](#veriloghardware-reverse-engineering-srdnlenctf-2026)
 - [Prefix-by-Prefix Hash Reversal (Nullcon 2026)](#prefix-by-prefix-hash-reversal-nullcon-2026)
@@ -18,6 +19,8 @@
 - [Native JNI Key Extraction via Memory Dump and Smali Patching (HackIT 2017)](#native-jni-key-extraction-via-memory-dump-and-smali-patching-hackit-2017)
 - [IBM AS/400 SAVF File EBCDIC Decoding (EKOPARTY 2017)](#ibm-as400-savf-file-ebcdic-decoding-ekoparty-2017)
 - [Intel SGX Enclave Reverse Engineering (Pwn2Win 2017)](#intel-sgx-enclave-reverse-engineering-pwn2win-2017)
+- [Glulx Interactive Fiction Bytecode Matrix Validation (PlaidCTF 2018)](#glulx-interactive-fiction-bytecode-matrix-validation-plaidctf-2018)
+- [Android Smali Injection to Defeat LocalBroadcastManager (TAMUctf 2019)](#android-smali-injection-to-defeat-localbroadcastmanager-tamuctf-2019)
 
 For core language reversing (Python, BF/esolangs, DOS, Unity, OPAL), see [languages.md](languages.md).
 For Go and Rust binary reversing, see [languages-compiled.md](languages-compiled.md).
@@ -147,6 +150,32 @@ for i in range(patch_offset, patch_offset + 144):
 ```
 
 **Key insight:** Native libraries can modify DEX bytecode in memory via `/proc/self/maps` + `mprotect`, making static analysis of the APK alone insufficient. The XOR key and patch offsets must be extracted from the native `.so` to reconstruct the actual runtime DEX. Only works on Dalvik (API < 21), not ART.
+
+---
+
+### Android Native .so Loading Bypass in New Project (Codegate CTF 2018)
+
+**Pattern:** Instead of reversing complex JNI validation logic, create a new Android Studio project with matching package name, class name, and native method signature. Load the original `.so` library and call the native function directly, completely bypassing all Java-level checks (random number validation, PIN entry, root detection, etc.).
+
+```java
+// Create new project with same package: com.example.puing.a2018codegate
+package com.example.puing.a2018codegate;
+public class Main4Activity extends AppCompatActivity {
+    static { System.loadLibrary("hello-libs"); }
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        String flag = stringFromJNI();  // call native directly, skip all Java validation
+        Log.d("FLAG", flag);
+    }
+    public native String stringFromJNI();
+}
+```
+
+**Key insight:** JNI function names encode the package path and class name. Create a new Android project with matching package/class/method names, include the original `.so`, and call the native function directly. All Java-level validation (random checks, PIN entry, root detection) is bypassed entirely.
+
+**Detection:** APK with native `.so` library where the flag or secret is computed inside the native code and returned to Java. The Java layer has multiple validation gates (EditText checks, random number comparisons, device checks) before calling the native method.
+
+**References:** Codegate CTF 2018
 
 ---
 
@@ -499,3 +528,65 @@ sk = c.finalize()
 **Key insight:** SGX remote attestation key derivation is deterministic given the enclave measurement — reimplementing the protocol in Python recovers the same session key.
 
 **References:** Pwn2Win CTF 2017
+
+---
+
+## Glulx Interactive Fiction Bytecode Matrix Validation (PlaidCTF 2018)
+
+**Pattern:** Challenge is a Glulx interactive fiction story (`.ulx`/`.blorb`) that accepts player input, scrambles it via a matrix multiplication inside the VM, and compares the result to a hardcoded vector. A hidden `xyzzy`-style command enables a debug room whose side exit reveals the target vector and constant matrix.
+
+**Workflow:**
+1. Disassemble with `glulxd` (Glulx toolkit) or run under `glulxe`/`git` interpreters while dumping memory at each VM instruction.
+2. Locate the matrix constant (look for aligned 32-bit integers adjacent to the comparison routine) and the target vector referenced by the comparison.
+3. Type the hidden-command trigger to reach the debug room — Glulx games often respond to `xyzzy`, `plugh`, or developer verbs that still appear in the dictionary table (`.DictTable`).
+4. Invert the transformation in Python: `input_vec = target_vec * matrix.inverse()` over `Z_{2^32}` (Glulx integers are unsigned 32-bit).
+
+```python
+from sage.all import matrix, Zmod
+
+M = matrix(Zmod(2**32), rows)       # rows[i] = extracted matrix row
+target = vector(Zmod(2**32), output)
+answer = M.solve_right(target)      # required player input as 32-bit words
+print(bytes(answer.list()).decode())
+```
+
+**Key insight:** Adventure-game VMs always keep the original story text in the dictionary and object tables — grep the bytecode for developer verbs (`xyzzy`, `debug`, `god`, `plugh`) to discover hidden rooms before reversing the check itself. Glulx validation routines are typically linear over 32-bit integers, so solving them with Sage matrix inversion is faster than symbolic execution.
+
+**References:** PlaidCTF 2018 — writeup 10019
+
+---
+
+## Android Smali Injection to Defeat LocalBroadcastManager (TAMUctf 2019)
+
+**Pattern (Local News):** APK registers a `BroadcastReceiver` through `LocalBroadcastManager.getInstance(this).registerReceiver(...)` that only decodes the flag when triggered by the app itself. External `adb shell am broadcast` is silently dropped because local broadcasts never leave the process:
+
+```bash
+$ adb shell cmd package query-receivers --brief -a com.tamu.ctf.START
+# No receivers found
+```
+
+Swapping the registration for `Context.registerReceiver` force-closes the app (manifest mismatch). Instead, clone the `onReceive` body and inline it into `onCreate` so the deobfuscator (e.g., Paranoid's `Deobfuscator$app$Debug.getString(0)`) runs at startup and the plaintext flag lands in `logcat`.
+
+Decompile, patch, rebuild, sign with a debug keystore, install, capture logcat:
+
+```smali
+# Inside MainActivity.smali, inserted before the final return of onCreate():
+const/4 v1, 0x0
+invoke-static {v1}, Lio/michaelrocks/paranoid/Deobfuscator$app$Debug;->getString(I)Ljava/lang/String;
+move-result-object v1
+invoke-static {v1, v1}, Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+```
+
+```bash
+apktool d app.apk -o app
+# patch MainActivity.smali ...
+apktool b app -o app/dist/app.apk
+jarsigner -keystore ~/.android/debug.keystore -storepass android \
+  app/dist/app.apk androiddebugkey
+adb install -r app/dist/app.apk
+adb logcat | grep -i flag
+```
+
+**Key insight:** `LocalBroadcastManager`-registered receivers cannot be invoked from `adb`, so the obvious "send the intent yourself" trick fails and static deobfuscation of Paranoid strings is painful. Smali patching sidesteps both: move the deobfuscation call to a path that runs automatically and redirect its output to `Log.d()`, turning a local-only receiver into a logcat-visible primitive.
+
+**References:** TAMUctf 2019 — Local News, writeup 13565

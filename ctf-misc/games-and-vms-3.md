@@ -21,9 +21,13 @@
   - [Docker Socket Escape](#docker-socket-escape)
   - [Capability-Based Escape (CAP_SYS_ADMIN)](#capability-based-escape-cap_sys_admin)
   - [Container Information Leakage](#container-information-leakage)
+- [15-Puzzle Solvability as Bit Encoder (SharifCTF 8)](#15-puzzle-solvability-as-bit-encoder-sharifctf-8)
 - [Levenshtein Distance Oracle Attack (SunshineCTF 2016)](#levenshtein-distance-oracle-attack-sunshinectf-2016)
 - [SECCOMP Bypass via High-Bit File Descriptor Trick (33C3 CTF 2016)](#seccomp-bypass-via-high-bit-file-descriptor-trick-33c3-ctf-2016)
 - [rvim Jail Escape via Custom vimrc with Python3 Execution (BKP 2017)](#rvim-jail-escape-via-custom-vimrc-with-python3-execution-bkp-2017)
+- [Restricted vim Escape via CTRL-W F and netrw File Browser (TokyoWesterns 2018)](#restricted-vim-escape-via-ctrl-w-f-and-netrw-file-browser-tokyowesterns-2018)
+- [Taint Analysis Bypass in Custom Language via Type Coercion (PlaidCTF 2018)](#taint-analysis-bypass-in-custom-language-via-type-coercion-plaidctf-2018)
+- [Shredded Document Pixel-Edge Reassembly Under Time Pressure (Nuit du Hack CTF 2018)](#shredded-document-pixel-edge-reassembly-under-time-pressure-nuit-du-hack-ctf-2018)
 - [References](#references)
 
 ---
@@ -500,6 +504,85 @@ Even without escape, containers leak host info:
 
 ---
 
+## 15-Puzzle Solvability as Bit Encoder (SharifCTF 8)
+
+128 15-puzzles encode 128 bits of a flag. Each bit is 1 if the puzzle is solvable, 0 if not:
+
+```python
+def is_solvable(grid):
+    # Count inversions (pairs where a > b and a appears before b)
+    flat = [x for row in grid for x in row if x != 0]
+    inversions = sum(1 for i in range(len(flat))
+                     for j in range(i+1, len(flat)) if flat[i] > flat[j])
+    # For 4x4: solvable iff inversions + blank_row_from_bottom is even
+    blank_row = next(i for i, row in enumerate(grid) if 0 in row)
+    blank_from_bottom = len(grid) - 1 - blank_row
+    return (inversions + blank_from_bottom) % 2 == 0
+
+flag_bits = ''.join('1' if is_solvable(puzzle) else '0' for puzzle in puzzles)
+flag = bytes(int(flag_bits[i:i+8], 2) for i in range(0, len(flag_bits), 8))
+```
+
+**Key insight:** The 15-puzzle has an invariant: exactly half of all permutations are solvable. A puzzle's solvability depends on the parity of inversions plus the blank tile's row from the bottom. This provides a natural 1-bit encoding per puzzle. When a challenge provides many puzzle instances with no obvious goal, check if solvability encodes binary data. The number of puzzles matching a multiple of 8 strongly suggests bit encoding.
+
+---
+
+## Taint Analysis Bypass in Custom Language via Type Coercion (PlaidCTF 2018)
+
+**Pattern:** In a custom ML-like language with a secrecy/taint system, the if-expression's secrecy depends on the return type, not the condition. Wrap side-effecting code in a function, coerce it to a private type, and use if-statement to select between dummy and leaking functions based on private flag bits. The purity checker doesn't analyze function internals.
+
+```ml
+(* pupper variant: if condition's secrecy doesn't propagate to return *)
+let leaked = ref 0 in
+let test = fn (bit : int) =>
+  if !secret < bit then ()
+  else (secret := !secret - bit; leaked := !leaked + bit)
+in
+test 128; test 64; test 32; test 16; test 8; test 4; test 2; test 1;
+!leaked  (* public int that reveals private byte *)
+
+(* doggo variant: function coercion hides side effects *)
+let ignore = (fn (bit : int) => () :> private unit) :> private (int -> private unit) in
+let incr = (fn (bit : int) => (leaked := !leaked + bit) :> private unit)
+           :> private (int -> private unit) in
+(if !secret < bit then ignore else incr) bit
+(* if returns private function type, but selected function modifies public ref *)
+```
+
+**Key insight:** Information flow type systems often check secrecy labels at expression level, not data flow level. If the return type matches but the side effects differ, the type checker is satisfied while private data leaks through public mutable references. Two common bypasses: (1) if-condition secrecy not propagated to branches, (2) function type coercion hiding mutable side effects.
+
+---
+
+## Shredded Document Pixel-Edge Reassembly Under Time Pressure (Nuit du Hack CTF 2018)
+
+**Pattern:** 100 shredded paper strips must be reassembled under 10-second time limit. Detect orientation via token position, compute edge similarity using pixel darkness bitmasks, greedily place strips by minimizing XOR/Hamming distance between adjacent edges, then OCR.
+
+```python
+from PIL import Image
+import pytesseract
+
+class Strip:
+    def __init__(self, img):
+        self.img = img
+        w, h = img.size
+        self.trace_first = 0  # left edge bitmask
+        self.trace_last = 0   # right edge bitmask
+        for y in range(h):
+            # Dark pixel (sum < 765) = bit set at position y
+            self.trace_first |= (1 if sum(img.getpixel((0, y))) < 765 else 0) << y
+            self.trace_last |= (1 if sum(img.getpixel((w-1, y))) < 765 else 0) << y
+
+def edge_distance(strip_a, strip_b):
+    """Hamming distance between right edge of A and left edge of B"""
+    return bin(strip_a.trace_last ^ strip_b.trace_first).count('1')
+
+# Greedy placement: for each position, pick the strip with minimum edge distance
+```
+
+**Key insight:** Shredded document strips share edge pixels at cut boundaries. Encode each strip's left and right edge as binary bitmasks (dark=1, light=0), then use XOR + popcount (Hamming distance) to find the best-matching adjacent strips. Greedy placement with edge distance metric reassembles the document in milliseconds.
+
+---
+
 ## References
 - EHAX 2026 "The Architect's Gambit": Multi-phase AES + HMAC + GF(256) Nim
 - BSidesSF 2026 "wromwarp": Emulator ROM-switching state preservation
@@ -507,9 +590,12 @@ Even without escape, containers leak host info:
 - Hack.lu 2015: Parallel connection oracle relay
 - SECCON 2015: Nonogram solver to QR code pipeline
 - Sharif CTF 2016: 100 prisoners problem / cycle-following strategy
+- SharifCTF 8: 15-puzzle solvability as bit encoder
 - Midnight Flag 2026: C code jail escape via emoji identifiers
 - BSidesSF 2026 "builds-as-a-service": BuildKit daemon build secret exploitation
 - SunshineCTF 2016: Levenshtein distance oracle attack
+- PlaidCTF 2018: Taint analysis bypass via type coercion in custom language
+- Nuit du Hack CTF 2018: Shredded document pixel-edge reassembly
 
 ---
 
@@ -573,6 +659,31 @@ sudo -u secretuser rvim -u /tmp/evil_vimrc /dev/null
 **Key insight:** `rvim` restricts shell commands (`:!cmd`) but Python/Lua/Ruby interfaces remain available. The `:python3` or `:py3` command executes arbitrary Python code, including `os.system()`. If vim was compiled with `+python3`, this bypasses all shell restrictions. Check `:version` for `+python3`, `+lua`, or `+ruby` — any scripting interface escapes the jail.
 
 ---
+
+## Restricted vim Escape via CTRL-W F and netrw File Browser (TokyoWesterns 2018)
+
+**Pattern:** A vim jail blocks `:`, `Q`, `g`, and scripting interfaces (`:py`, `:lua`, `:ruby`), but leaves normal-mode navigation commands alive. Press `CTRL-W` followed by `F` (capital) — vim splits a new window and opens the netrw file browser on the path under the cursor. From netrw you navigate like a directory listing and read arbitrary files with zero `:` commands.
+
+```text
+# Keystrokes (no ex commands required)
+:   — blocked
+CTRL-W F    — splits window, opens current path as netrw buffer
+j / k       — navigate entries
+Enter       — read selected file into a new buffer
+
+# If you need to run a command and `:` is banned, put the cursor on a keyword
+# such as `ls` and press K — vim opens the man page, then inside the man page
+# you can press `!` and get a shell prompt.
+```
+
+**Key insight:** vim's restricted mode only covers `:`-based ex commands; normal-mode file-browser (`netrw`), manual-page lookup (`K`), and help (`<C-w>gF`) interfaces stay wide open. Any binary that enforces "restricted vim" via `:set modifiable`, disabled `:!`, or a blocked command-line is trivially bypassed by one of CTRL-W F, K, or gF. When auditing a vim sandbox, always test these three normal-mode primitives first.
+
+**References:** TokyoWesterns CTF 4th 2018 — vimshell, writeup 11269
+
+---
+
+See [games-and-vms-4.md](games-and-vms-4.md) for 2018-era additions (XSLT VM, JS edge cases, timing oracles, OEIS, QR reassembly, math recurrences, CAPTCHA solvers, esolang polyglots, bytebeat).
+
 
 See also: [games-and-vms.md](games-and-vms.md) for WASM patching, Roblox place file reversing, PyInstaller extraction, marshal analysis, Python env RCE, Z3 constraint solving, K8s RBAC bypass, floating-point precision exploitation, and custom assembly language sandbox escape.
 

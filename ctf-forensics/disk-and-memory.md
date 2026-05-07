@@ -5,6 +5,7 @@
 - [Disk Image Analysis](#disk-image-analysis)
 - [VM Forensics (OVA/VMDK)](#vm-forensics-ovavmdk)
 - [VMware Snapshot Forensics](#vmware-snapshot-forensics)
+- [GIMP Raw Memory Dump Visual Inspection (INShAck 2018)](#gimp-raw-memory-dump-visual-inspection-inshack-2018)
 - [Coredump Analysis](#coredump-analysis)
 - [Windows KAPE Triage Analysis (UTCTF 2026)](#windows-kape-triage-analysis-utctf-2026)
 - [PowerShell Ransomware Analysis](#powershell-ransomware-analysis)
@@ -13,6 +14,9 @@
 - [Cloud Storage Forensics (AWS S3 / GCP / Azure)](#cloud-storage-forensics-aws-s3--gcp--azure)
 - [BSON (Binary JSON) Format Reconstruction (IceCTF 2016)](#bson-binary-json-format-reconstruction-icectf-2016)
 - [TrueCrypt / VeraCrypt Volume Mounting (GreHack CTF 2016)](#truecrypt--veracrypt-volume-mounting-grehack-ctf-2016)
+- [Volatility mftparser Offset-Based Deleted File Recovery (BSides Delhi 2018)](#volatility-mftparser-offset-based-deleted-file-recovery-bsides-delhi-2018)
+- [Brotli Blob Detection via ASCII-Art Signature (ASIS Finals 2018)](#brotli-blob-detection-via-ascii-art-signature-asis-finals-2018)
+- [corkami/pocs MD5 PDF Collision Generation (35C3 2018)](#corkamipocs-md5-pdf-collision-generation-35c3-2018)
 - [See Also](#see-also)
 
 ---
@@ -99,6 +103,45 @@ vmss2core -W path/to/snapshot.vmss path/to/snapshot.vmem
 vol3 -f memory.dmp windows.mftscan | grep flag
 # mtime as Unix epoch → seed for PRNG → derive encryption key
 ```
+
+---
+
+## GIMP Raw Memory Dump Visual Inspection (INShAck 2018)
+
+**Pattern:** When Volatility fails or profiles don't match, open raw memory dumps directly in GIMP as raw image data. Scroll through memory while adjusting image width to find previously-displayed images rendered as pixel data.
+
+**Steps:**
+1. Open `.dmp` file in GIMP: File > Open, set image type to "Raw image data"
+2. Set pixel format to RGB, width to ~1920 (monitor resolution)
+3. Scroll through the file offset while adjusting width with arrow keys
+4. Previously-displayed images (desktop, browser content) become visible when width matches the original stride
+
+```bash
+# Alternative: use Python + PIL to scan memory as pixel data
+python3 -c "
+from PIL import Image
+import numpy as np
+
+with open('memory.dmp', 'rb') as f:
+    data = f.read()
+
+# Try common display widths: 1920, 1366, 1280, 1024
+for width in [1920, 1366, 1280, 1024]:
+    stride = width * 3  # RGB = 3 bytes per pixel
+    # Sample at various offsets through the dump
+    for offset in range(0, len(data) - stride * 100, stride * 500):
+        chunk = data[offset:offset + stride * 100]
+        if len(chunk) == stride * 100:
+            img = Image.frombytes('RGB', (width, 100), chunk)
+            # Check if image has meaningful content (not all zeros/noise)
+            arr = np.array(img)
+            if 10 < arr.mean() < 245 and arr.std() > 20:
+                img.save(f'frame_{width}_{offset}.png')
+                print(f'Potential image at offset {offset}, width {width}')
+"
+```
+
+**Key insight:** Raw memory dumps contain framebuffer data that was displayed on screen. GIMP can render arbitrary binary data as pixels. When the image width matches the original display stride, screenshots of the user's desktop become visible without any forensics tools, profiles, or decryption.
 
 ---
 
@@ -382,7 +425,67 @@ veracrypt -t --truecrypt -p "password" volume.tc /mnt/vc
 
 ---
 
+## Volatility mftparser Offset-Based Deleted File Recovery (BSides Delhi 2018)
+
+**Pattern:** Standard `dumpfiles` or `filescan` + `dumpfiles --physaddr` fails on a deleted file because its directory entry has been marked free. The MFT record that still holds the file's `$DATA` attribute survives until the record is reused. Volatility 2's `mftparser` can dump the resident `$DATA` directly when given the exact `--offset` of the MFT record found via `filescan`.
+
+```bash
+# 1. Locate the MFT record offset (Volatility 2 example; Vol3 uses windows.mftscan)
+vol.py -f Challenge.raw --profile=Win7SP1x86 mftparser \
+    | grep -A2 "target_filename"
+
+# 2. Dump every attribute of the matching MFT entry, including $DATA
+vol.py -f Challenge.raw --profile=Win7SP1x86 mftparser \
+    --offset=0x7ca3c00 --dump-dir=./out/
+
+ls ./out/
+# file.data.$DATA contains the recovered content
+```
+
+**Key insight:** NTFS marks files "deleted" by flipping one bit in the MFT record header (`0x16` byte: `0x01 == in use`). Until the record is reallocated, the entire `$DATA` attribute is still intact and only lazily freed. Use `mftparser --offset=<record>` for resident files (under ~700 bytes — stored inline in the MFT) and `dd`/`icat` with the cluster runs for larger files. Always also grep for the filename in `windows.mftscan` output before giving up: memory-resident MFT fragments are still findable after on-disk deletion.
+
+**References:** BSides Delhi CTF 2018 — Never Too Late Mister, writeups 11963, 11970
+
+---
+
+## Brotli Blob Detection via ASCII-Art Signature (ASIS Finals 2018)
+
+**Pattern:** Binwalk and `file` miss Brotli-compressed data because the format has no fixed magic. Decompress candidate blobs with `brotli.decompress()`; the Brotli reference implementation embeds its own ASCII-art logo `Brrroootttllliii` as a sanity-check output. If the decompressed bytes contain that or other Brotli-specific telemetry strings, the original blob was Brotli.
+
+```python
+import brotli
+try:
+    out = brotli.decompress(blob)
+    if b'rrrooottl' in out or b'Brotli' in out:
+        print('Brotli-compressed')
+except Exception: pass
+```
+
+**Key insight:** Any compressor without a magic byte is identifiable by trial decompression. For Brotli, `zstd`, `snappy`, `lzma-alone`, spin through each library in order until one succeeds without raising.
+
+**References:** ASIS CTF Finals 2018 — Green Cabbage, writeup 12419
+
+---
+
+## corkami/pocs MD5 PDF Collision Generation (35C3 2018)
+
+**Pattern:** Challenge demands two valid PDFs with the same MD5 but different content. Use corkami/pocs `pdf.py` combined with `enscript | ps2pdf` to produce a PDF header with collision-friendly padding, then drive the collision via `fastcoll` (or `hashclash` for chosen-prefix). Works because the PDF format tolerates garbage in the `%PDF` trailer region that the MD5 collision block can overwrite.
+
+```bash
+enscript -p out.ps content.txt
+ps2pdf out.ps base.pdf
+python pdf.py base.pdf target1.pdf target2.pdf
+fastcoll -p base.pdf -o target1.pdf target2.pdf
+md5sum target1.pdf target2.pdf    # identical
+```
+
+**Key insight:** PDF collision is a one-command pipeline with the right toolchain. The harder variant is chosen-prefix MD5 (different visible content) which requires `hashclash` and 10-20 CPU-hours. Check `pocs/collisions/` for every file format with prebuilt scaffolds.
+
+**References:** 35C3 CTF 2018 — collider, writeup 12836
+
+---
+
 ## See Also
 
-- [disk-advanced.md](disk-advanced.md) - Advanced disk and memory techniques (deleted partition recovery, ZFS forensics, GPT GUID encoding, VMDK sparse parsing, memory dump string carving, ransomware key recovery, WordPerfect macro XOR, minidump ISO 9660 recovery, APFS snapshot recovery, RAID 5 XOR recovery)
+- [disk-advanced.md](disk-advanced.md) - Advanced disk and memory techniques (deleted partition recovery, ZFS forensics, GPT GUID encoding, VMDK sparse parsing, memory dump string carving, ransomware key recovery, WordPerfect macro XOR, minidump ISO 9660 recovery, APFS snapshot recovery, RAID 5 XOR recovery, Kyoto Cabinet hash DB forensics)
 - [disk-recovery.md](disk-recovery.md) - Disk recovery and extraction patterns (LUKS master key recovery, PRNG timestamp seed brute-force, VBA macro binary recovery, FemtoZip decompression, XFS reconstruction, tar duplicate entry extraction, nested matryoshka filesystem extraction, anti-carving via null byte interleaving)

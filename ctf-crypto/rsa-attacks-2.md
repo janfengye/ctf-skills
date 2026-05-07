@@ -15,6 +15,23 @@
 - [RSA Timing Attack on Montgomery Reduction (DEF CON 2017)](#rsa-timing-attack-on-montgomery-reduction-def-con-2017)
 - [Bleichenbacher Low-Exponent RSA Signature Forgery (Google CTF 2017)](#bleichenbacher-low-exponent-rsa-signature-forgery-google-ctf-2017)
 - [Coppersmith Small Roots for Linearly Related Primes (Tokyo Westerns 2017)](#coppersmith-small-roots-for-linearly-related-primes-tokyo-westerns-2017)
+- [ROCA Attack on RSA CVE-2017-15361 (EasyCTF IV)](#roca-attack-on-rsa-cve-2017-15361-easyctf-iv)
+- [RSA Signature Bypass with e=1 and Crafted Modulus (BackdoorCTF 2018)](#rsa-signature-bypass-with-e1-and-crafted-modulus-backdoorctf-2018)
+- [Dependent-Prime RSA: q = e^-1 mod p (TokyoWesterns CTF 4th 2018)](#dependent-prime-rsa-q--e-1-mod-p-tokyowesterns-ctf-4th-2018)
+- [RSA Three-Key Pairwise GCD Triangle (Trend Micro 2018)](#rsa-three-key-pairwise-gcd-triangle-trend-micro-2018)
+- [RSA n = p^2*q Schmidt-Samoa Variant (ASIS Finals 2018)](#rsa-n--p2q-schmidt-samoa-variant-asis-finals-2018)
+- [Modulus Recovery via GCD of Encryption Residuals (X-MAS CTF 2018)](#modulus-recovery-via-gcd-of-encryption-residuals-x-mas-ctf-2018)
+- [Textbook RSA Negation via encrypt(-1) (X-MAS CTF 2018)](#textbook-rsa-negation-via-encrypt-1-x-mas-ctf-2018)
+- [Poly-Exponent RSA: GCD of p^p Combinations (ASIS Finals 2018)](#poly-exponent-rsa-gcd-of-pp-combinations-asis-finals-2018)
+- [Biased LSB Oracle with Mode-of-Runs Recovery (CSAW CTF 2018)](#biased-lsb-oracle-with-mode-of-runs-recovery-csaw-ctf-2018)
+- [Cube-Root Wraparound via AES-CTR Length Hint (hxp 2018)](#cube-root-wraparound-via-aes-ctr-length-hint-hxp-2018)
+- [RSA p = next_prime(2^k + small) Shared-Prime Batch GCD (ASIS Finals 2018)](#rsa-p--next_prime2k--small-shared-prime-batch-gcd-asis-finals-2018)
+- [PNG Encryption Bounded by 512-bit Key → Trailer Replacement (ASIS Finals 2018)](#png-encryption-bounded-by-512-bit-key--trailer-replacement-asis-finals-2018)
+- [Modulus Recovery via Plaintext Malleability (X-MAS 2018)](#modulus-recovery-via-plaintext-malleability-x-mas-2018)
+- [RSA CRT d_p NULL-Byte Overflow Primes Leak (P.W.N. CTF 2018)](#rsa-crt-d_p-null-byte-overflow-primes-leak-pwn-ctf-2018)
+- [Textbook RSA Signature Blinding via Message Factoring (P.W.N. CTF 2018)](#textbook-rsa-signature-blinding-via-message-factoring-pwn-ctf-2018)
+- [Last-Byte Modulus Overwrite via strlen-1 Null Truncation (OTW Advent 2018)](#last-byte-modulus-overwrite-via-strlen-1-null-truncation-otw-advent-2018)
+- [CRC32 Collision Oracle + RSA Homomorphic Signature Forgery (BSidesSF 2019)](#crc32-collision-oracle--rsa-homomorphic-signature-forgery-bsidessf-2019)
 
 See also: [rsa-attacks.md](rsa-attacks.md) for foundational RSA attacks (small e, Wiener, Fermat, Pollard, Hastad, common modulus, Manger oracle, Coppersmith).
 
@@ -435,3 +452,341 @@ if roots:
 **Key insight:** When `q ≈ k*p`, approximately half the bits of `p` (and `q`) are recoverable from `sqrt(N/k)`. The remaining unknown `delta` is small enough for Coppersmith when `delta < N^(1/4)`. The upper bound `q_approx` must exceed `q`; add a safety margin of `2^(bitlen/2)` to ensure the root is captured.
 
 **References:** Tokyo Westerns CTF 2017
+
+---
+
+## ROCA Attack on RSA CVE-2017-15361 (EasyCTF IV)
+
+**Pattern:** Infineon RSA library generates keys with structured primes (detectable via fingerprint). Factor 512-bit keys in minutes:
+
+```bash
+# Detect ROCA vulnerability
+pip install roca-detect
+roca-detect rsa_key.pub
+# Factor with neca tool
+git clone https://gitlab.com/jix/neca.git
+cd neca && cargo build --release
+./target/release/neca <N_decimal>
+# Or use: https://github.com/crocs-muni/roca (original research tool)
+```
+
+**Key insight:** CVE-2017-15361 affects Infineon TPMs, smart cards, and YubiKey 4. Primes have the form `p = k * M + (65537^a mod M)` where M is the product of first n primes. Detection is instant (check `65537^x mod M` divides `n mod M`). Factoring uses Coppersmith's method on the known structure. Keys up to 2048 bits are practically attackable. For CTF use: if `roca-detect` reports vulnerable, use `neca` for 512-bit keys or the `crocs-muni/roca` tool for larger keys.
+
+**References:** EasyCTF IV (2018)
+
+---
+
+### RSA Signature Bypass with e=1 and Crafted Modulus (BackdoorCTF 2018)
+
+**Pattern:** Server generates RSA signature and asks for `(n, e)` to verify it. With `e=1`, `pow(s, 1, n) = s mod n`. Set `n = signature - PKCS1_pad(message)` so verification passes. (BackdoorCTF 2018)
+
+```python
+e = 1
+n = signature ** e - PKCS1_pad(h.hexdigest())
+# Now pow(signature, 1, n) == PKCS1_pad(message)
+```
+
+**Key insight:** When the verifier accepts user-supplied public key parameters without constraints, setting `e=1` makes modular exponentiation trivial. Choose `n` such that `signature mod n` equals the expected padded hash.
+
+---
+
+## Dependent-Prime RSA: q = e^-1 mod p (TokyoWesterns CTF 4th 2018)
+
+**Pattern:** Key generation picks prime `p`, then sets `q = e^(-1) mod p` and rerolls until `q` is prime. The dependency `e*q ≡ 1 (mod p)` means `e*q = k*p + 1` for some small positive integer `k`, so `n = p*q = p*(k*p + 1)/e` — a quadratic in `p` that factors after enumerating a few candidate `k` values.
+
+**Exploit:**
+```python
+from sage.all import PolynomialRing, ZZ
+
+def factor_dependent_n(n, e, max_k=100000):
+    P = PolynomialRing(ZZ, 'p'); p = P.gen()
+    for k in range(2, max_k, 2):
+        # e*q = k*p + 1 and n = p*q  =>  e*n = p*(k*p + 1)
+        poly = k * p * p + p - e * n
+        roots = poly.roots()
+        for root, _ in roots:
+            if root > 1 and n % root == 0:
+                return int(root), n // int(root)
+    return None
+```
+
+**Key insight:** Any key generator that derives `q` from `p` via a public arithmetic relation collapses RSA security to a small search. Write the relation as a polynomial `f_k(p) = 0` parameterized by a small integer, and use `.roots()` in Sage to recover `p`. The search space for `k` is typically under 2^16 because `q < p` forces `k ≈ e`.
+
+**References:** TokyoWesterns CTF 4th 2018 — writeup 10862
+
+---
+
+## RSA Three-Key Pairwise GCD Triangle (Trend Micro 2018)
+
+**Pattern:** Three RSA moduli `N1 = p1*p2`, `N2 = p1*p3`, `N3 = p2*p3` share primes pairwise (every pair has exactly one common factor). A single pairwise `gcd` reveals the shared prime, giving a complete factorisation of all three moduli without running batch-GCD.
+
+```python
+from math import gcd
+
+def factor_triangle(n1, n2, n3):
+    p1 = gcd(n1, n2)        # shared between N1 and N2
+    p2 = gcd(n1, n3)        # shared between N1 and N3
+    p3 = gcd(n2, n3)        # shared between N2 and N3
+    assert n1 == p1 * p2 and n2 == p1 * p3 and n3 == p2 * p3
+    return p1, p2, p3
+```
+
+**Key insight:** Batch-GCD handles arbitrary sets of moduli that might share a prime, but the three-key triangle is a closed-form case: every prime appears in exactly two moduli, so three `gcd()` calls factor all three keys. Spot the pattern when a challenge hands you exactly three public keys with matching bit-lengths and no other hint — contrast with [batch GCD for shared prime factoring](#batch-gcd-for-shared-prime-factoring-bsidessf-2025), which is the general case over larger key sets.
+
+**References:** Trend Micro CTF 2018 — Offensive-Analysis 300, writeup 11129
+
+---
+
+## RSA n = p^2*q Schmidt-Samoa Variant (ASIS Finals 2018)
+
+**Pattern:** Modulus is generated as `n = p*p*q` (not the usual `p*q`). Naive `phi = (p-1)*(q-1)` is wrong — real totient is `phi = p*(p-1)*(q-1)`. If `gcd(e, phi) != 1`, reduce ciphertext to smaller field `q` and invert there.
+
+```python
+phi = p*(p-1)*(q-1)
+# Reduce enc to mod-q by inverse_mod(q, phi)
+qinv = inverse_mod(q, phi)
+enc = pow(enc, qinv, n) % q
+# Now m < q; invert e*p^2 over phi(q) = q-1
+pinv = inverse_mod(p*p, q-1)
+m = pow(enc, pinv, q)
+```
+
+**Key insight:** Spot `n = p^2*q` by trying `iroot(n, 3)` near its cube root and running Pollard/Lenstra on small fraction of `n`. Once factored, switch to the correct totient and field before inversion.
+
+**References:** ASIS CTF Finals 2018 — John-Bull, writeup 12401
+
+---
+
+## Modulus Recovery via GCD of Encryption Residuals (X-MAS CTF 2018)
+
+**Pattern:** Oracle encrypts arbitrary plaintexts with a hidden RSA key but does not disclose `n`. Compute `m^e - enc(m)` for two plaintexts; both differences are multiples of `n`, so their GCD equals `n` (or a small multiple).
+
+```python
+e = 65537
+r1 = bytes_to_long(b'a')**e - encrypt(b'a')
+r2 = bytes_to_long(b'b')**e - encrypt(b'b')
+n = gcd(r1, r2)
+```
+
+**Key insight:** Works whenever the oracle is a black box but accepts chosen plaintexts. Strip small prime factors from the GCD to recover the true `n`.
+
+**References:** X-MAS CTF 2018 — Santa's list, writeups 12701-12800
+
+---
+
+## Textbook RSA Negation via encrypt(-1) (X-MAS CTF 2018)
+
+**Pattern:** Decrypt oracle refuses to decrypt the target ciphertext directly but accepts multiplications. Because `(-1)^e ≡ -1 (mod n)`, multiplying by `pow(-1, e, n)` flips the plaintext sign modulo `n`.
+
+```python
+ct_mutated = (ct_flag * pow(-1, e, n)) % n
+plaintext = (-decrypt(ct_mutated)) % n
+```
+
+**Key insight:** Any odd `e` makes `encrypt(-1) = -1 mod n`, so the oracle returns `-m mod n` for the original ciphertext even if the original `m` is blacklisted.
+
+**References:** X-MAS CTF 2018 — Santa's list 2.0, writeups 12701-12800
+
+---
+
+## Poly-Exponent RSA: GCD of p^p Combinations (ASIS Finals 2018)
+
+**Pattern:** Challenge publishes several linear/polynomial combinations of `p` and `q`, e.g. `c1 = p^p mod q`, `c2 = (p+q)^(p+q) mod n`. Form two expressions both divisible by the target prime, then take their GCD to factor `n`.
+
+```python
+p = gcd(c2*c4 - c3, pow(c4, c4, c2*c4 - c3) - c3)
+q = gcd(c1*c4 - c3, pow(c4, c4, c1*c4 - c3) - c3)
+for x in small_primes:
+    while p % x == 0: p //= x
+```
+
+**Key insight:** If two quantities share a secret factor but differ only by known scalars, `gcd(a, b)` recovers that factor. Strip cofactors with trial division on small primes.
+
+**References:** ASIS CTF Finals 2018 — NMC, writeup 12427
+
+---
+
+## Biased LSB Oracle with Mode-of-Runs Recovery (CSAW CTF 2018)
+
+**Pattern:** LSB oracle leaks the least significant bit of `m * 2^i mod n`, but the binary search converges inconsistently (oracle gives slightly wrong answers at random). Run the full recovery loop many times and take the per-byte mode across runs — correct bytes appear most often even when the full plaintext never converges.
+
+```python
+def recover():
+    beg, end = 0, n - 1
+    for bit in bits:
+        mid = (beg + end) // 2
+        if bit: beg = mid
+        else:   end = mid
+    return long_to_bytes(end)
+
+byte_counts = [Counter() for _ in range(flag_len)]
+for _ in range(N):
+    flag = recover()
+    for i, b in enumerate(flag):
+        byte_counts[i][b] += 1
+flag = bytes(c.most_common(1)[0][0] for c in byte_counts)
+```
+
+**Key insight:** Noisy side channels still leak the correct byte per position if each run independently biases toward the true value. Vote across runs rather than trying to perfect a single decryption.
+
+**References:** CSAW CTF 2018 — Lost Mind, writeup 12490
+
+---
+
+## Cube-Root Wraparound via AES-CTR Length Hint (hxp 2018)
+
+**Pattern:** Low-exponent RSA (`e = 3`) with padded plaintext where `m^3 > n`, so naive cube root fails. AES-CTR ciphertext reveals the plaintext length (CTR preserves length), so you know exactly how many `n` to add. Rescale with `inverse(2, n)^k` to cancel padding shifts, then try `iroot(c + k*n, 3)` for small `k`.
+
+```python
+inv = pow(inverse(2, n), 2040, n)
+c = c * inv % n
+for k in range(1000):
+    m, ok = gmpy2.iroot(c + k*n, 3)
+    if ok: flag = long_to_bytes(int(m)); break
+```
+
+**Key insight:** When padding shifts the plaintext past `n`, the correct root lies in `c + k*n` for some small `k`; AES-CTR leaks the exact plaintext length so you can size the search.
+
+**References:** hxp CTF 2018 — daring, writeup 12588
+
+---
+
+## RSA p = next_prime(2^k + small) Shared-Prime Batch GCD (ASIS Finals 2018)
+
+**Pattern:** Key generator constructs `p = next_prime(2^k + random_small_delta)` where `delta` is bounded by a few bits. Two independent keys generated with the same `k` converge on the same next prime whenever their `delta` values fall between the same two consecutive primes — common enough that any pair of collected moduli has `gcd(n1, n2) > 1`.
+
+```python
+from math import gcd
+for n_a in collected:
+    for n_b in collected:
+        if n_a == n_b: continue
+        p = gcd(n_a, n_b)
+        if 1 < p < n_a:
+            q = n_a // p
+            d = pow(e + 2, -1, (p-1)*(q-1))  # NMC-style
+            break
+```
+
+**Key insight:** Any RSA keygen that sources primes from a low-entropy neighborhood (`next_prime(constant + small)`, `2^k + random_byte`, `Mersenne ± delta`) collapses to pairwise GCD because the `next_prime` step collapses many deltas onto the same prime.
+
+**References:** ASIS CTF Finals 2018 — Ariogen, writeup 12414
+
+---
+
+## PNG Encryption Bounded by 512-bit Key → Trailer Replacement (ASIS Finals 2018)
+
+**Pattern:** Custom "polynomial bit sum" cipher encrypts PNG bytes as `C = sum(bit_i * (exp^i + (-1)^i))`. The key length (≤512 bits) means at most 64 bytes of plaintext are affected. Since PNG's trailing IDAT + IEND chunks are format-recoverable from any reference image, simply splice a valid trailer onto the decrypted prefix.
+
+```python
+# Only the first 64 bytes of output depend on the key; the rest matches plaintext bit-for-bit
+first64 = decrypt_affected_prefix(ct)
+rest    = original_png[64:]                # copy from any reference PNG with same image data
+open('recovered.png', 'wb').write(first64 + rest)
+```
+
+**Key insight:** Whenever the key size caps the *number of affected bytes*, tail-of-file reconstruction beats full cryptanalysis. Works for any format (PNG, ZIP, MP3, PDF) where the tail has standard chunks or a parser tolerates garbage.
+
+**References:** ASIS CTF Finals 2018 — Made by baby, writeup 12423
+
+---
+
+## Modulus Recovery via Plaintext Malleability (X-MAS 2018)
+
+**Pattern:** Oracle decrypts ciphertext and returns the plaintext but hides the modulus `N`. Send two related ciphertexts `c` and `c * 2^e`. The decrypted plaintexts are `m` and `(2m) mod N`. If `2*m != (2m mod N)`, the difference `2m - (2m mod N) = N` recovers the modulus.
+
+```python
+m1 = decrypt(ct)                       # m
+m2 = decrypt((ct * pow(2, e, m1)) % m1)  # 2m mod N
+N = 2*m1 - m2 if 2*m1 != m2 else None
+```
+
+**Key insight:** RSA's multiplicative homomorphism leaks the modulus whenever you can send `c * k^e` and observe the wraparound. Use any small multiplier that nudges the plaintext past `N`.
+
+**References:** X-MAS CTF 2018 — Santa's list, writeup 12658
+
+---
+
+## RSA CRT d_p NULL-Byte Overflow Primes Leak (P.W.N. CTF 2018)
+
+**Pattern:** Server reads `d_p` into a buffer via `fgets()` that lacks a bounds check. Sending 33+ null bytes NULL-terminates `d_p_str` so the parsed integer is 0. The CRT path computes `m_2 = 0^0 = 1`, then signs `m - m_2 = m - 1`, which when squared in the gcd step yields `p = gcd(sig, N)`.
+
+```python
+io.send(b'\x00' * 40)                 # overflow d_p buffer
+sig = io.recvline()
+p = gcd(sig - 1, N)                   # factored!
+```
+
+**Key insight:** Any CRT-based RSA implementation that parses private key fields from network input is vulnerable to "make `d_p` equal to 0" tricks. The gcd of a forged signature and the modulus reveals a prime.
+
+**References:** P.W.N. CTF 2018 — City RSA, writeup 12052
+
+---
+
+## Textbook RSA Signature Blinding via Message Factoring (P.W.N. CTF 2018)
+
+**Pattern:** Unpadded RSA refuses to sign certain messages (blacklist), but multiplicative homomorphism lets you decompose the forbidden message `m` into coprime factors `m = x * y mod N`, request signatures for `x` and `y` separately, and combine: `sig(m) = sig(x) * sig(y) mod N`.
+
+```python
+for x in range(2, 10000):
+    if (m * pow(x, -1, N)) % N == allowed_y:
+        y = allowed_y
+        sig = (sign(x) * sign(y)) % N
+        break
+```
+
+**Key insight:** Any unpadded RSA signing oracle is vulnerable to factoring-based blinding. The attacker only needs two valid-looking messages whose product equals the target.
+
+**References:** P.W.N. CTF 2018 — City RSA, writeup 12052
+
+---
+
+## Last-Byte Modulus Overwrite via strlen-1 Null Truncation (OTW Advent 2018)
+
+**Pattern:** Server truncates `username[strlen(username)-1] = 0` to strip the trailing newline. Passing an empty username writes the null byte to the byte *before* the buffer — which turns out to be the last byte of `N`. The modified `N` is composite in a small way (differs from the real `N` by at most 255) and is factorable by Carmichael or `sage.factor`.
+
+```python
+io.sendline(b'')                       # empty username overwrites N[-1]
+N_corrupt = recv_N()
+for delta in range(256):
+    if is_factorable(N_corrupt + delta - 255):
+        N_real = N_corrupt + delta - 255; break
+```
+
+**Key insight:** "Strip the last character" idioms (`buf[strlen-1] = 0`) are classic off-by-one when `strlen == 0`. They write one byte backwards into whatever sits before the buffer — often a crypto constant.
+
+**References:** OverTheWire Advent Bonanza 2018 — Day 14, writeup 12752
+
+---
+
+## CRC32 Collision Oracle + RSA Homomorphic Signature Forgery (BSidesSF 2019)
+
+**Pattern (rsaos):** Shell exposes `RSA(foldhash(cmd))` as a "signature" where `foldhash` is a 10-byte digest built from a CRC-like, factorable fold. Privileged commands are blocked, but signatures for arbitrary strings are handed out. Pick a target privileged command whose fold value factors entirely into primes `< 2^32`. For each small factor `f_i`, use [crchack](https://github.com/resilar/crchack) to craft an innocuous command whose CRC32 equals `f_i` exactly, get its signature, and multiply them modulo `N`. RSA's multiplicativity means the product is the signature of the fold *product*, which is the target fold.
+
+```python
+from primefac import primefac
+import subprocess, random
+
+def find_cmd_crc(target_crc):
+    while True:
+        open('/tmp/cmd', 'w').write(f'echo {random.randint(0, 10000)}')
+        cmd = subprocess.check_output(['./crchack/crchack', '/tmp/cmd', hex(target_crc)])
+        if b'\n' not in cmd:
+            return cmd
+
+def find_cmd_fac(priv):
+    while True:
+        c = f'{priv} {random.randint(0, 10000)}'.encode()
+        fs = list(primefac(foldhash(c)))
+        if all(f < 2**32 for f in fs):
+            return c, fs
+
+priv_cmd, factors = find_cmd_fac('get-flag')
+t = 1
+for f in factors:                               # each factor fits in CRC32 range
+    cmd = find_cmd_crc(f)
+    _, sig = get_sig(cmd)                        # oracle signs arbitrary cmd
+    t = (t * sig) % N                            # RSA: s1*s2 = sign(h1*h2)
+send_priv(priv_cmd, sig=hex(t % N))              # forged signature for get-flag
+```
+
+**Key insight:** Textbook RSA signatures are multiplicative: `sign(a) * sign(b) = sign(a*b) mod N`. If the "hash" is actually a linear/factorable function (CRC32, fold-XOR), factor the target digest into pieces small enough to fit in CRC output space, then use a CRC collision finder (`crchack`) to realise each factor as an innocuous message the oracle will sign. Multiply the signatures mod `N` to forge the privileged signature. Works for any signature scheme over a hash that is both homomorphic-friendly *and* collidable to specific targets.

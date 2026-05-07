@@ -22,6 +22,11 @@ Block cipher attacks, MAC forgery, padding oracles, and authenticated encryption
 - [AES Key Recovery via Byte-by-Byte Zeroing Oracle (CONFidence CTF 2017)](#aes-key-recovery-via-byte-by-byte-zeroing-oracle-confidence-ctf-2017)
 - [AES-CTR Constant Counter / Repeating Keystream (SHA2017)](#aes-ctr-constant-counter--repeating-keystream-sha2017)
 - [Custom SPN Column-Wise XOR Brute-Force (Hack Dat Kiwi 2017)](#custom-spn-column-wise-xor-brute-force-hack-dat-kiwi-2017)
+- [AES-CTR Bitflip + CRC Linearity Signature Forgery (hxp CTF 2017)](#aes-ctr-bitflip--crc-linearity-signature-forgery-hxp-ctf-2017)
+- [AES-CBC Ciphertext Forging via Error-Message Decryption Oracle (Nuit du Hack CTF 2018)](#aes-cbc-ciphertext-forging-via-error-message-decryption-oracle-nuit-du-hack-ctf-2018)
+- [SHA-1 Chosen-Prefix Collision for PDF Signature Forgery (DEF CON Quals 2018)](#sha-1-chosen-prefix-collision-for-pdf-signature-forgery-def-con-quals-2018)
+- [Hash Chain Preimage Authentication Bypass (picoCTF 2017)](#hash-chain-preimage-authentication-bypass-picoctf-2017)
+- [AES-CBC Nonce Strip via Block Boundary Alignment (Trend Micro 2018)](#aes-cbc-nonce-strip-via-block-boundary-alignment-trend-micro-2018)
 
 See also [modern-ciphers-2.md](modern-ciphers-2.md) for CRC32 forgery, Blum-Goldwasser, hash length extension, compression oracle, hash time reversal, OFB invertible RNG, weak key derivation, HMAC-CRC, DES weak keys, SRP bypass, modified AES S-Box, square attack, AES-ECB byte-at-a-time, AES-ECB cut-and-paste, AES-CBC IV bit-flip, Rabin LSB parity oracle, PBKDF2 pre-hash bypass, MD5 multi-collision, custom hash state reversal, and CRC32 brute-force.
 
@@ -523,3 +528,122 @@ for i, ct_byte in enumerate(ciphertext):
 **Key insight:** Column-aligned XOR layers in SPN ciphers allow independent per-byte brute-force using printable-text consistency as an oracle. Cross-column key reuse from seed-based permutations propagates partial solutions.
 
 **References:** Hack Dat Kiwi 2017
+
+---
+
+## AES-CTR Bitflip + CRC Linearity Signature Forgery (hxp CTF 2017)
+
+**Pattern:** AES-CTR allows targeted plaintext modification via XOR. CRC is linear w.r.t. XOR: `CRC(A ^ B) = CRC(A) ^ CRC(B) ^ CRC(zeros)`. Flip `{admin: 0}` to `{admin: 1}` in ciphertext and fix the encrypted CRC:
+
+```python
+import binascii
+# X = desired_plaintext XOR original_plaintext (flip bit)
+X = b'\x00' * offset + b'\x01' + b'\x00' * remaining
+crc_diff = binascii.crc32(X) ^ binascii.crc32(b'\x00' * len(X))
+# New ciphertext = old_ciphertext XOR X (for data portion)
+# New CRC ciphertext = old_CRC_ciphertext XOR pack(crc_diff)
+```
+
+**Key insight:** CRC is GF(2)-linear -- XOR-based modifications to plaintext produce predictable CRC changes without knowing the key. When a system uses AES-CTR for confidentiality + CRC for integrity (instead of a proper MAC like HMAC or GCM), you can flip arbitrary plaintext bits and fix the CRC simultaneously. This is a fundamental failure of using CRC as a MAC: CRC detects random errors but provides zero protection against adversarial modification under stream ciphers.
+
+**References:** hxp CTF 2017
+
+---
+
+### AES-CBC Ciphertext Forging via Error-Message Decryption Oracle (Nuit du Hack CTF 2018)
+
+**Pattern:** Server decrypts AES-CBC cookie and displays decrypted value in error messages. Send zero blocks, read decrypted intermediates from error, XOR with desired plaintext to forge ciphertext block-by-block. Use forged ciphertext to deliver blind SQLi payloads through encrypted cookies. (Nuit du Hack CTF 2018)
+
+```python
+# Forge ciphertext for arbitrary plaintext
+for i in range(blocks):
+    payload = b'\x00' * 16 * (blocks - 1) + last_forged_block
+    response = send_payload(payload)
+    decrypted = parse_error_message(response)  # server leaks decrypted bytes
+    intermediate = decrypted[-16:]
+    new_block = xor(target_plaintext_block, intermediate)
+    forged_blocks.append(new_block)
+```
+
+**Key insight:** When the server reveals decrypted ciphertext in error messages, you can forge arbitrary plaintext without knowing the key. Send zero IV blocks to learn the intermediate state, then XOR with desired plaintext to produce the correct ciphertext. Build block-by-block from last to first.
+
+---
+
+## SHA-1 Chosen-Prefix Collision for PDF Signature Forgery (DEF CON Quals 2018)
+
+**Pattern (EmojiVote):** Server extracts commands from an uploaded PDF via OCR, then signs the OCR'd byte-string as `sha1(data)` and attaches the signature. Use a shattered-style SHA-1 chosen-prefix collision to produce two PDFs that OCR to different commands but share the same SHA-1 digest.
+
+**Exploit workflow:**
+1. Build PDF A that OCR's to a benign command (no `EXECUTE`) and PDF B that OCR's to `EXECUTE <attacker command>`.
+2. Pad both with shattered-style suffix data so `sha1(A) == sha1(B)`.
+3. Submit A to obtain a valid signature for the shared digest.
+4. Replay that signature on B — the server verifies the SHA-1 matches and executes the attacker command.
+
+```bash
+# Build the two colliding PDFs (cpc = chosen-prefix collision tool)
+./cpc prefix_A prefix_B collision_A.pdf collision_B.pdf
+sha1sum collision_A.pdf collision_B.pdf  # identical
+# Upload A, capture signature, replay on B
+```
+
+**Key insight:** When a protocol signs a message as `sign(sha1(M))` instead of `sign(M)` directly, any SHA-1 collision becomes a signature forgery. Chosen-prefix collisions are practical (cpc/shattered toolkit) — the signer only inspects the digest, never the second preimage.
+
+**References:** DEF CON CTF Qualifier 2018 — writeup 10075
+
+---
+
+## Hash Chain Preimage Authentication Bypass (picoCTF 2017)
+
+**Pattern (hash_chain):** Server authenticates the Nth challenge by asking for `hash^(N-1)(seed)` given `hash^N(seed)`. The seed is derivable from public user data (e.g., `md5(username)`), so any attacker can precompute the whole chain from the start and answer any step.
+
+**Exploit:**
+```python
+import hashlib
+
+def H(x): return hashlib.md5(x).digest()
+
+seed = H(username.encode())        # public-derived seed
+chain = [seed]
+for _ in range(TARGET_N + 1):
+    chain.append(H(chain[-1]))
+
+# Server sends chain[N]; answer with chain[N-1]
+```
+
+**Key insight:** Hash chains are only one-way if the seed is secret. If the seed can be reconstructed from public inputs (username, challenge ID, timestamp), the entire chain is computable forward, and answering "give me the previous hash" is trivial. Treat the seed like a key.
+
+**References:** picoCTF 2017 — writeup 10031
+
+---
+
+## AES-CBC Nonce Strip via Block Boundary Alignment (Trend Micro 2018)
+
+**Pattern:** A server encrypts `nonce | padding | identity | timestamp` with AES-CBC and returns `(iv, ciphertext)`. If the attacker can choose padding such that the first *exactly one* AES block (16 bytes) holds the nonce, then shifting the IV forward by one block — reusing `ciphertext[:16]` as the new IV and `ciphertext[16:]` as the new ciphertext — yields a valid encryption of just `identity | timestamp`. No key is needed because CBC-mode decryption of block 2 is `AES⁻¹(c[16:32]) XOR c[0:16]`, which is exactly the identity-and-timestamp plaintext once the nonce block is promoted to IV.
+
+```python
+from Crypto.Cipher import AES
+import os
+
+key = os.urandom(16)
+
+# Server builds plaintext and encrypts
+def encrypt_with_nonce(identity, timestamp):
+    nonce = os.urandom(8)
+    padding = b"\x00" * 8          # brings nonce + padding to 16 bytes
+    plaintext = nonce + padding + identity + timestamp
+    iv = os.urandom(16)
+    ct = AES.new(key, AES.MODE_CBC, iv).encrypt(plaintext)
+    return iv, ct
+
+iv, ct = encrypt_with_nonce(b"admin___________", b"2018-11-01T00:00")
+
+# Attacker rewrites (iv', ct') to drop the nonce block
+new_iv = ct[:16]
+new_ct = ct[16:]
+recovered = AES.new(key, AES.MODE_CBC, new_iv).decrypt(new_ct)
+assert recovered.startswith(b"admin")
+```
+
+**Key insight:** CBC's IV is only consulted for the first block — every subsequent block uses the previous ciphertext as its "IV". That means any contiguous slice of a CBC ciphertext is itself a valid CBC ciphertext if you promote the preceding block (or a supplied IV) to the new IV. Whenever a fixed-size header (nonce, magic bytes, counter) occupies exactly one block, the attacker can strip it by reusing that block as an IV. Defend by binding the header into the authentication tag (AEAD) or including its offset in an HMAC.
+
+**References:** Trend Micro CTF 2018 — Offensive-Analysis 400, writeup 11130

